@@ -81,25 +81,28 @@ class SnakeGame:
 
         # 更新频率
         self.move_interval: float = 0.02
-        self.last_move_time: float = 0.0
 
-        # 状态
-        cx, cy = self.width // 2, self.height // 2
-        #self.snake 是一个点列表，每个点是 (x, y) 坐标，snake[0] 是蛇头，snake[-1] 是蛇尾，蛇体按固定间距水平排列
-        # 初始蛇体按固定间距展开，避免重叠导致开局自撞
-        self.snake: list[PointF] = [(cx - i * self.segment_length, cy) for i in range(self.min_segments)]
-        self.score: int = 0
-        self.game_over: bool = False
-        self.target_pos: PointI = (cx, cy)
-        self.food: PointI = self.generate_food()
+        # -------- 多蛇状态（支持单人/双人模式） --------
+        # 默认单人，run 时会询问模式并重置
+        self.mode: str = "single"  # "single" 或 "dual"
+        self.num_snakes: int = 1
+        self.snakes: list[list[PointF]] = []
+        self.scores: list[int] = []
+        self.game_overs: list[bool] = []
+        self.target_pos: list[PointI] = []
+        self.food: PointI = (0, 0)
+        self.last_move_times: list[float] = []
+        self._init_state()
+
+        # 全局暂停状态
         self.manual_paused: bool = False  # 空格手动暂停
-        self.auto_paused: bool = False    # 无手检测自动暂停
+        self.auto_paused: bool = False    # 无手（两只手都没检测到）自动暂停
 
         # MediaPipe
         self.mp_hands = mp.solutions.hands
         self.hands = self.mp_hands.Hands(
             static_image_mode=False,
-            max_num_hands=1,
+            max_num_hands=2,
             min_detection_confidence=0.7,
             min_tracking_confidence=0.5
         )
@@ -111,6 +114,27 @@ class SnakeGame:
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
 
     # ---------------- 工具 ----------------
+
+    def _init_state(self) -> None:
+        """根据当前 num_snakes 初始化/重置状态。"""
+        cx, cy = self.width // 2, self.height // 2
+        if self.num_snakes == 1:
+            spawn_offsets = [0]
+        else:
+            # 两条蛇左右分开
+            spawn_offsets = [-self.width // 4, self.width // 4]
+
+        self.snakes = []
+        for i in range(self.num_snakes):
+            base_x = cx + spawn_offsets[i]
+            body = [(base_x - j * self.segment_length, cy) for j in range(self.min_segments)]
+            self.snakes.append(body)
+
+        self.scores = [0 for _ in range(self.num_snakes)]
+        self.game_overs = [False for _ in range(self.num_snakes)]
+        self.target_pos = [(cx, cy) for _ in range(self.num_snakes)]
+        self.last_move_times = [0.0 for _ in range(self.num_snakes)]
+        self.food = self.generate_food()
     def clamp(self, v: int, lo: int, hi: int) -> int:
         """将整数 v 限制在闭区间 [lo, hi] 内。"""
         return max(lo, min(hi, v))
@@ -122,55 +146,64 @@ class SnakeGame:
 
     # ---------------- 核心逻辑 ----------------
     def generate_food(self) -> PointI:
-        """随机生成食物位置，并与蛇头保持一定距离。"""
+        """随机生成公共食物位置，并与所有蛇的蛇头保持一定距离。"""
         margin: Final[int] = 50
         while True:
             x = random.randint(margin, self.width - margin)
             y = random.randint(margin, self.height - margin)
-            if self.dist2((x, y), self.snake[0]) > (self.food_radius * 5) ** 2:
+            ok = True
+            for snake in self.snakes:
+                if self.dist2((x, y), snake[0]) <= (self.food_radius * 5) ** 2:
+                    ok = False
+                    break
+            if ok:
                 return (x, y)
 
-    def detect_hand(self, frame: np.ndarray) -> Optional[PointI]:
-        """检测当前帧中的食指指尖（landmark 8）。
+    def detect_hands(self, frame: np.ndarray) -> list[dict]:
+        """检测当前帧中的双手食指指尖，返回每只手的信息列表。
 
-        返回：
-            (x, y) 指尖在摄像头画面中的像素坐标；若未检测到手则返回 None。
+        返回的每个元素为：
+            {
+                "pos": (x, y),   # 指尖像素坐标
+                "label": "Left" / "Right"  # 手的左右属性
+            }
+        若未检测到手，则返回空列表。
         """
-        #将图像从 BGR 格式转换为 RGB 格式
+        # 将图像从 BGR 格式转换为 RGB 格式
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        #检测手部
+        # 检测手部
         results = self.hands.process(rgb)
-        #初始化fingerpos
-        finger_pos: Optional[PointI] = None
-        #如果检测到手部
-        if results.multi_hand_landmarks:
-            #获取第一只手
-            lm = results.multi_hand_landmarks[0]
-            #绘制骨架
-            self.mp_draw.draw_landmarks(frame, lm, self.mp_hands.HAND_CONNECTIONS)
-            h, w, _ = frame.shape
-            #拿到食指指尖点位
-            p = lm.landmark[8]
-            #转换为像素坐标
-            finger_pos = (int(p.x * w), int(p.y * h))
-            #在指尖位置绘制绿色圆圈
-            cv2.circle(frame, finger_pos, 10, (0, 255, 0), -1)
-        return finger_pos
+        hands_info: list[dict] = []
 
-    def update_target(self, finger_pos: Optional[PointI], frame_shape: Tuple[int, int, int]) -> None:
-        """根据指尖像素坐标更新游戏坐标系中的目标点。"""
-        if finger_pos is None:
-            return
+        if results.multi_hand_landmarks and results.multi_handedness:
+            for lm, handedness in zip(results.multi_hand_landmarks, results.multi_handedness):
+                # 绘制骨架
+                self.mp_draw.draw_landmarks(frame, lm, self.mp_hands.HAND_CONNECTIONS)
+                h, w, _ = frame.shape
+                # 拿到食指指尖点位
+                p = lm.landmark[8]
+                # 转换为像素坐标
+                finger_pos: PointI = (int(p.x * w), int(p.y * h))
+                # 在指尖位置绘制绿色圆圈
+                cv2.circle(frame, finger_pos, 10, (0, 255, 0), -1)
+
+                label = handedness.classification[0].label  # "Left" 或 "Right"
+                hands_info.append({"pos": finger_pos, "label": label})
+
+        return hands_info
+
+    def update_target(self, snake_index: int, finger_pos: PointI, frame_shape: Tuple[int, int, int]) -> None:
+        """根据某只手的指尖像素坐标，更新对应蛇的目标点。"""
         fh, fw = frame_shape[:2]
         # 将摄像头像素坐标映射到游戏坐标系。
         tx = self.clamp(int(finger_pos[0] / fw * self.width), 0, self.width - 1)
         ty = self.clamp(int(finger_pos[1] / fh * self.height), 0, self.height - 1)
-        self.target_pos = (tx, ty)
+        self.target_pos[snake_index] = (tx, ty)
 
-    def step_head(self) -> PointF:
-        """计算下一步蛇头位置（连续坐标），朝当前目标点移动。"""
-        hx, hy = self.snake[0]
-        tx, ty = self.target_pos
+    def step_head(self, snake_index: int) -> PointF:
+        """计算某条蛇下一步蛇头位置（连续坐标），朝当前目标点移动。"""
+        hx, hy = self.snakes[snake_index][0]
+        tx, ty = self.target_pos[snake_index]
         dx, dy = tx - hx, ty - hy
         dist = (dx * dx + dy * dy) ** 0.5
         if dist < self.follow_deadzone:
@@ -179,14 +212,16 @@ class SnakeGame:
         step = min(self.max_step, dist) * self.alpha
         return (hx + ux * step, hy + uy * step)
 
-    def rebuild_body(self, new_head: PointF) -> None:
-        """重建蛇身，使相邻节点间距保持为 segment_length。"""
+    def rebuild_body(self, snake_index: int, new_head: PointF) -> None:
+        """重建某条蛇的蛇身，使相邻节点间距保持为 segment_length。"""
         points: list[PointF] = [new_head]
         prev: PointF = new_head
 
+        old_snake = self.snakes[snake_index]
+
         # 从旧蛇的第1段(索引1)开始重建；旧头(索引0)不作为身体参考
-        for i in range(1, len(self.snake)):
-            cur = self.snake[i]
+        for i in range(1, len(old_snake)):
+            cur = old_snake[i]
             dx, dy = prev[0] - cur[0], prev[1] - cur[1]
             d = (dx * dx + dy * dy) ** 0.5
             if d < 1e-5:
@@ -198,100 +233,114 @@ class SnakeGame:
             points.append((nx, ny))
             prev = (nx, ny)
 
-        self.snake = points
+        self.snakes[snake_index] = points
 
-    def check_collision(self, new_head: PointF) -> bool:
-        """判断给定蛇头位置是否会发生碰撞。"""
+    def check_collision(self, snake_index: int, new_head: PointF) -> bool:
+        """判断给定蛇头位置是否会发生碰撞（与墙或自身）。"""
         x, y = new_head
         # 撞墙
         if x - self.head_radius < 0 or x + self.head_radius > self.width or y - self.head_radius < 0 or y + self.head_radius > self.height:
             return True
         # 撞身体（跳过头后三节，减少误判）
-        for seg in self.snake[3:]:
+        for seg in self.snakes[snake_index][3:]:
             if self.dist2(new_head, seg) < (self.head_radius + self.body_radius) ** 2:
                 return True
         return False
 
-    def move_snake(self) -> None:
-        """推进一次蛇的移动（带频率限制）。"""
-        if self.game_over:
+    def move_snake(self, snake_index: int) -> None:
+        """推进某条蛇的移动（带频率限制）。"""
+        if self.game_overs[snake_index]:
             return
         now = time.time()
-        if now - self.last_move_time < self.move_interval:
+        if now - self.last_move_times[snake_index] < self.move_interval:
             return
-        self.last_move_time = now
+        self.last_move_times[snake_index] = now
 
-        new_head = self.step_head()
+        new_head = self.step_head(snake_index)
 
         # 若头部未移动，直接跳过本帧，避免身体挤压到头部
-        if self.dist2(new_head, self.snake[0]) < 1e-6:
+        if self.dist2(new_head, self.snakes[snake_index][0]) < 1e-6:
             return
 
-        # 食物检测（宽容）
+        # 食物检测（宽容，公共食物，谁先吃到算谁的）
         if self.dist2(new_head, self.food) < (self.head_radius + self.food_radius) ** 2:
-            self.score += 1
-            tail = self.snake[-1]
-            self.snake.append(tail)
+            self.scores[snake_index] += 1
+            tail = self.snakes[snake_index][-1]
+            self.snakes[snake_index].append(tail)
             self.food = self.generate_food()
 
         # 先按新头重建身体，再做自碰撞检测，避免用旧身体位置误判
-        self.rebuild_body(new_head)
+        self.rebuild_body(snake_index, new_head)
 
         # 自碰撞检测（跳过头后三节，减少误判）
-        for seg in self.snake[3:]:
+        for seg in self.snakes[snake_index][3:]:
             if self.dist2(new_head, seg) < (self.head_radius + self.body_radius) ** 2:
-                self.game_over = True
+                self.game_overs[snake_index] = True
                 return
 
         # 撞墙检测
         x, y = new_head
         if x - self.head_radius < 0 or x + self.head_radius > self.width or y - self.head_radius < 0 or y + self.head_radius > self.height:
-            self.game_over = True
+            self.game_overs[snake_index] = True
             return
 
     # ---------------- 绘制 ----------------
     def draw(self, frame: np.ndarray) -> None:
-        """将游戏元素（蛇、食物、分数等）绘制到摄像头画面上。"""
+        """将游戏元素（多条蛇、食物、分数等）绘制到摄像头画面上。"""
         canvas = np.zeros_like(frame)
 
-        # 食物
+        # 为不同蛇设置不同的主体颜色（绿色 / 青色）
+        snake_colors = [(0, 255, 0), (0, 200, 200)]
+
+        # 公共食物（只画一次）
         fx, fy = int(self.food[0]), int(self.food[1])
         cv2.circle(canvas, (fx, fy), self.food_radius, (0, 0, 255), -1)
         cv2.circle(canvas, (fx, fy), self.food_radius, (255, 255, 255), 2)
 
-        # 身体线
-        if len(self.snake) > 1:
-            for i in range(len(self.snake) - 1):
-                p1 = (int(self.snake[i][0]), int(self.snake[i][1]))
-                p2 = (int(self.snake[i + 1][0]), int(self.snake[i + 1][1]))
-                alpha = 0.6 - (i / len(self.snake)) * 0.3
-                color = (0, int(200 * alpha), 0)
-                cv2.line(canvas, p1, p2, color, 12, cv2.LINE_AA)
+        for idx in range(self.num_snakes):
+            snake = self.snakes[idx]
 
-        # 节点
-        for i, seg in enumerate(self.snake):
-            if i == 0:
-                color = (0, 255, 0)
-                r = self.head_radius
-            else:
-                alpha = max(0.4, 1.0 - (i / len(self.snake)) * 0.6)
-                color = (0, int(220 * alpha), 0)
-                r = max(6, int(self.body_radius * (0.9 - 0.4 * (i / len(self.snake)))))
-            cv2.circle(canvas, (int(seg[0]), int(seg[1])), r, color, -1)
-            cv2.circle(canvas, (int(seg[0]), int(seg[1])), r, (255, 255, 255), 1)
+            # 身体线
+            if len(snake) > 1:
+                for i in range(len(snake) - 1):
+                    p1 = (int(snake[i][0]), int(snake[i][1]))
+                    p2 = (int(snake[i + 1][0]), int(snake[i + 1][1]))
+                    alpha = 0.6 - (i / len(snake)) * 0.3
+                    base_color = snake_colors[idx % len(snake_colors)]
+                    color = (base_color[0], int(base_color[1] * alpha), base_color[2])
+                    cv2.line(canvas, p1, p2, color, 12, cv2.LINE_AA)
 
-        # 头部眼睛
-        hx, hy = int(self.snake[0][0]), int(self.snake[0][1])
-        eye = max(2, self.head_radius // 4)
-        eyes = [(hx + eye, hy - eye), (hx + eye, hy + eye)]
-        for ex, ey in eyes:
-            cv2.circle(canvas, (ex, ey), eye, (0, 0, 0), -1)
+            # 节点
+            for i, seg in enumerate(snake):
+                if i == 0:
+                    color = snake_colors[idx % len(snake_colors)]
+                    r = self.head_radius
+                else:
+                    alpha = max(0.4, 1.0 - (i / len(snake)) * 0.6)
+                    base_color = snake_colors[idx % len(snake_colors)]
+                    color = (base_color[0], int(220 * alpha), base_color[2])
+                    r = max(6, int(self.body_radius * (0.9 - 0.4 * (i / len(snake)))))
+                cv2.circle(canvas, (int(seg[0]), int(seg[1])), r, color, -1)
+                cv2.circle(canvas, (int(seg[0]), int(seg[1])), r, (255, 255, 255), 1)
+
+            # 头部眼睛
+            hx, hy = int(snake[0][0]), int(snake[0][1])
+            eye = max(2, self.head_radius // 4)
+            eyes = [(hx + eye, hy - eye), (hx + eye, hy + eye)]
+            for ex, ey in eyes:
+                cv2.circle(canvas, (ex, ey), eye, (0, 0, 0), -1)
 
         # 叠加
         cv2.addWeighted(canvas, 0.7, frame, 0.3, 0, frame)
-        cv2.putText(frame, f"Score: {self.score}", (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.4, (255, 255, 255), 3)
 
-        if self.game_over:
+        # 分数显示：左蛇 / 右蛇
+        cv2.putText(frame, f"Score L: {self.scores[0]}", (10, 40),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 3)
+        if self.num_snakes > 1:
+            cv2.putText(frame, f"Score R: {self.scores[1]}", (10, 80),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 3)
+
+        if any(self.game_overs):
             text = "Game Over! Press R to restart"
             size = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 1, 2)[0]
             cv2.putText(frame, text, ((frame.shape[1] - size[0]) // 2, frame.shape[0] // 2),
@@ -299,44 +348,104 @@ class SnakeGame:
 
     # ---------------- 控制 ----------------
     def reset(self) -> None:
-        """重置游戏状态（蛇、分数、食物等）。"""
-        cx, cy = self.width // 2, self.height // 2
-        # 重置时同样按间距展开，防止重叠自撞
-        self.snake = [(cx - i * self.segment_length, cy) for i in range(self.min_segments)]
-        self.score = 0
-        self.game_over = False
-        self.target_pos = (cx, cy)
-        self.last_move_time = 0
-        self.food = self.generate_food()
+        """重置游戏状态（多条蛇、分数、食物等）。"""
+        self._init_state()
 
     def run(self) -> None:
         """主循环：读取摄像头帧、更新游戏、渲染并处理按键。"""
         print("贪吃蛇（连续坐标，无网格版）启动")
-        print("操作：食指指尖控制蛇头；R 重开；Q 退出；空格 暂停/继续；无手自动暂停")
+        print("选择模式：1 单人（单手控制一条蛇），2 双人（双手各控一条蛇）")
+
+        # 选择模式
+        while True:
+            choice = input("请选择模式 (1 单人 / 2 双人): ").strip()
+            if choice in ("1", "2"):
+                break
+            print("输入无效，请输入 1 或 2")
+
+        if choice == "1":
+            self.mode = "single"
+            self.num_snakes = 1
+        else:
+            self.mode = "dual"
+            self.num_snakes = 2
+
+        self.reset()
+
+        print("操作：")
+        if self.mode == "single":
+            print("  单人模式：任意一只手食指指尖控制蛇；无手自动暂停；空格 暂停/继续；R 重开；Q 退出")
+        else:
+            print("  双人模式：左手控制左蛇，右手控制右蛇；若仅一只手被检测到则自动暂停；空格 暂停/继续；R 重开；Q 退出")
 
         while True:
-            #cv2.VideoCapture对象捕获摄图像帧
-            #ret是Boolean值标志是否成功
+            # cv2.VideoCapture对象捕获摄像头图像帧
+            # ret是Boolean值标志是否成功
             ret, frame = self.cap.read()
             if not ret:
                 break
-            #水平翻转摄像头
+            # 水平翻转摄像头
             frame = cv2.flip(frame, 1)
-            #拿到食指指尖位置
-            finger_pos = self.detect_hand(frame)
 
-            # 自动暂停：检测不到手时暂停，检测到手时恢复（若未手动暂停）
-            self.auto_paused = finger_pos is None
+            # 拿到所有检测到的手的信息
+            hands_info = self.detect_hands(frame)
 
-            if not self.auto_paused:
-                #更新目标点
-                self.update_target(finger_pos, frame.shape)
+            # 为每条蛇记录当前帧是否有对应的手
+            has_hand_for_snake = [False for _ in range(self.num_snakes)]
+
+            if self.mode == "single":
+                # 单人：只控制蛇 0。检测到任何一只手即控制；未检测到手则自动暂停
+                if hands_info:
+                    pos: PointI = hands_info[0]["pos"]
+                    has_hand_for_snake[0] = True
+                    self.update_target(0, pos, frame.shape)
+                self.auto_paused = not has_hand_for_snake[0]
+            else:
+                # 双人：需要左右手各控制一条蛇；若未检测到两只手则自动暂停
+                if len(hands_info) >= 2:
+                    assigned = [False, False]
+                    # 先按标签分配
+                    for hinfo in hands_info:
+                        pos: PointI = hinfo["pos"]
+                        label: str = hinfo["label"]
+                        if label == "Left":
+                            has_hand_for_snake[0] = True
+                            self.update_target(0, pos, frame.shape)
+                            assigned[0] = True
+                        elif label == "Right":
+                            has_hand_for_snake[1] = True
+                            self.update_target(1, pos, frame.shape)
+                            assigned[1] = True
+                    # 若标签不全，按检测顺序补齐前两只手
+                    idx_fill = 0
+                    for hinfo in hands_info:
+                        if assigned[0] and assigned[1]:
+                            break
+                        pos: PointI = hinfo["pos"]
+                        if not assigned[0]:
+                            has_hand_for_snake[0] = True
+                            self.update_target(0, pos, frame.shape)
+                            assigned[0] = True
+                            continue
+                        if not assigned[1]:
+                            has_hand_for_snake[1] = True
+                            self.update_target(1, pos, frame.shape)
+                            assigned[1] = True
+                    # 需要两只手都在，才允许移动
+                    self.auto_paused = not all(has_hand_for_snake)
+                else:
+                    # 只检测到 0/1 只手，双人模式下自动暂停
+                    self.auto_paused = True
 
             paused = self.manual_paused or self.auto_paused
 
             if not paused:
-                self.move_snake()
-            #绘制
+                # 只有检测到对应手的蛇才会移动
+                for idx in range(self.num_snakes):
+                    if has_hand_for_snake[idx]:
+                        self.move_snake(idx)
+
+            # 绘制
             self.draw(frame)
             if paused:
                 cv2.putText(frame, "Paused", (self.width // 2 - 80, 80),
