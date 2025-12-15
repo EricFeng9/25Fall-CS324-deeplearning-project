@@ -3,20 +3,50 @@
 使用 MediaPipe Hands 检测食指指尖位置，并将蛇头以平滑方式朝目标点移动。
 """
 
-from __future__ import annotations
-
 import random
 import time
-from typing import Final, Optional, Tuple
+from typing import Optional, Tuple
 
 import cv2
 import mediapipe as mp
 import numpy as np
 
+USE_JETSON = False  # False 本地调试，True Jetson Nano
 
 # 类型别名：PointF 为连续坐标点；PointI 为整数像素坐标点。
 PointF = Tuple[float, float]
 PointI = Tuple[int, int]
+
+
+def gstreamer_pipeline(
+    sensor_id=0,
+    sensor_mode=4,          # 1280x720 @ 60fps
+    capture_width=1280,
+    capture_height=720,
+    display_width=1280,
+    display_height=720,
+    framerate=30,
+    flip_method=2
+):
+    return (
+        "nvarguscamerasrc sensor-id=%d sensor-mode=%d ! "
+        "video/x-raw(memory:NVMM), width=(int)%d, height=(int)%d, "
+        "format=(string)NV12, framerate=(fraction)%d/1 ! "
+        "nvvidconv flip-method=%d ! "
+        "video/x-raw, width=(int)%d, height=(int)%d, "
+        "format=(string)BGRx ! videoconvert ! "
+        "video/x-raw, format=(string)BGR ! appsink"
+        % (
+            sensor_id,
+            sensor_mode,
+            capture_width,
+            capture_height,
+            framerate,
+            flip_method,
+            display_width,
+            display_height,
+        )
+    )
 
 
 class SnakeGame:
@@ -106,9 +136,22 @@ class SnakeGame:
         self.mp_draw = mp.solutions.drawing_utils
 
         # 摄像头
-        self.cap = cv2.VideoCapture(0)
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+        if USE_JETSON:
+            pipeline = gstreamer_pipeline(
+                capture_width=width,
+                capture_height=height,
+                display_width=width,
+                display_height=height,
+                framerate=30,
+                flip_method=2
+            )
+            self.cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
+            if not self.cap.isOpened():
+                raise RuntimeError("❌ 无法通过 GStreamer 打开摄像头")
+        else:
+            self.cap = cv2.VideoCapture(0)
+            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
 
     # ---------------- 工具 ----------------
     def clamp(self, v: int, lo: int, hi: int) -> int:
