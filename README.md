@@ -18,6 +18,8 @@ pip install -r requirements.txt
 
 ## 运行游戏
 
+如果使用Jetson运行，将`snake_game.py`中的`USE_JETSON`设为True即可。
+
 ```bash
 python snake_game.py
 ```
