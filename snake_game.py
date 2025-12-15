@@ -85,6 +85,7 @@ class SnakeGame:
 
         # 状态
         cx, cy = self.width // 2, self.height // 2
+        #self.snake 是一个点列表，每个点是 (x, y) 坐标，snake[0] 是蛇头，snake[-1] 是蛇尾，蛇体按固定间距水平排列
         # 初始蛇体按固定间距展开，避免重叠导致开局自撞
         self.snake: list[PointF] = [(cx - i * self.segment_length, cy) for i in range(self.min_segments)]
         self.score: int = 0
@@ -135,15 +136,24 @@ class SnakeGame:
         返回：
             (x, y) 指尖在摄像头画面中的像素坐标；若未检测到手则返回 None。
         """
+        #将图像从 BGR 格式转换为 RGB 格式
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        #检测手部
         results = self.hands.process(rgb)
+        #初始化fingerpos
         finger_pos: Optional[PointI] = None
+        #如果检测到手部
         if results.multi_hand_landmarks:
+            #获取第一只手
             lm = results.multi_hand_landmarks[0]
+            #绘制骨架
             self.mp_draw.draw_landmarks(frame, lm, self.mp_hands.HAND_CONNECTIONS)
             h, w, _ = frame.shape
+            #拿到食指指尖点位
             p = lm.landmark[8]
+            #转换为像素坐标
             finger_pos = (int(p.x * w), int(p.y * h))
+            #在指尖位置绘制绿色圆圈
             cv2.circle(frame, finger_pos, 10, (0, 255, 0), -1)
         return finger_pos
 
@@ -305,23 +315,28 @@ class SnakeGame:
         print("操作：食指指尖控制蛇头；R 重开；Q 退出；空格 暂停/继续；无手自动暂停")
 
         while True:
+            #cv2.VideoCapture对象捕获摄图像帧
+            #ret是Boolean值标志是否成功
             ret, frame = self.cap.read()
             if not ret:
                 break
+            #水平翻转摄像头
             frame = cv2.flip(frame, 1)
-
+            #拿到食指指尖位置
             finger_pos = self.detect_hand(frame)
 
             # 自动暂停：检测不到手时暂停，检测到手时恢复（若未手动暂停）
             self.auto_paused = finger_pos is None
 
             if not self.auto_paused:
+                #更新目标点
                 self.update_target(finger_pos, frame.shape)
 
             paused = self.manual_paused or self.auto_paused
 
             if not paused:
                 self.move_snake()
+            #绘制
             self.draw(frame)
             if paused:
                 cv2.putText(frame, "Paused", (self.width // 2 - 80, 80),
