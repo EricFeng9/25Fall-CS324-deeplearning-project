@@ -14,22 +14,25 @@
 pip install -r requirements.txt
 """
 
-from __future__ import annotations
+from __future__ import annotations # 本地可以开，jetson上注释掉
 
 import random
 import time
+import sys
+import os
 from typing import Dict, List, Optional, Tuple
 
 import cv2
 import mediapipe as mp
 import numpy as np
+from PIL import Image, ImageDraw, ImageFont
 
 # -------------------- 可调常量 --------------------
 USE_JETSON = False  # Jetson Nano 上用 GStreamer，否则用普通摄像头
 # 目标分数：达到即获胜
 TARGET_SCORE = 10
-# 游戏区域外侧留白比例（上下左右各 10%）
-PADDING_RATIO = 0.10
+# 游戏区域外侧留白比例（上下左右各 5%）
+PADDING_RATIO = 0.05
 # 手丢失后继续前进的缓冲秒数（不立刻暂停）
 HAND_LOSS_GRACE = 2.0
 # 绑定时，手指与蛇头的距离阈值（像素）
@@ -69,6 +72,57 @@ def gstreamer_pipeline(
             display_height,
         )
     )
+
+# -------------------- 字体与 UI 工具 --------------------
+def get_safe_font(size: int) -> ImageFont.ImageFont:
+    """
+    跨平台加载字体：
+    1. macOS/Windows 优先尝试 Arial
+    2. Linux (Jetson) 尝试 DejaVuSans
+    3. 失败回退到 PIL 默认字体
+    """
+    # 候选字体列表（文件名或绝对路径）
+    candidates = [
+        "Arial.ttf",
+        "/System/Library/Fonts/Supplemental/Arial.ttf",  # macOS
+        "C:/Windows/Fonts/arial.ttf",                   # Windows
+        "DejaVuSans.ttf",                               # Linux / Jetson
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/freefont/FreeSans.ttf"
+    ]
+    
+    for font_path in candidates:
+        try:
+            return ImageFont.truetype(font_path, size)
+        except IOError:
+            continue
+    
+    print("Warning: Custom fonts not found, using default.")
+    return ImageFont.load_default()
+
+def draw_text_pill(
+    draw: ImageDraw.ImageDraw, 
+    pos: Tuple[int, int], 
+    text: str, 
+    font: ImageFont.ImageFont, 
+    text_color: Tuple[int, int, int] = (255, 255, 255),
+    bg_color: Tuple[int, int, int, int] = (0, 0, 0, 160),
+    padding: int = 10
+) -> None:
+    """
+    在 PIL ImageDraw 上绘制带有半透明圆角背景的文字。
+    pos: 文字左上角坐标 (x, y)
+    """
+    x, y = pos
+    bbox = draw.textbbox((0, 0), text, font=font)
+    w = bbox[2] - bbox[0]
+    h = bbox[3] - bbox[1]
+    
+    # 绘制背景矩形（向外扩充 padding）
+    bg_box = (x - padding, y - padding, x + w + padding, y + h + padding)
+    draw.rounded_rectangle(bg_box, radius=8, fill=bg_color)
+    
+    draw.text((x, y), text, font=font, fill=text_color)
 
 
 class HandTracker:
@@ -141,6 +195,11 @@ class SnakeGame:
         self.food: PointI = (0, 0)
         self.last_move_times: List[float] = []
         self.result_text: str = ""
+        
+        # 字体资源 (预加载不同大小)
+        self.font_lg = get_safe_font(60)
+        self.font_md = get_safe_font(32)
+        self.font_sm = get_safe_font(20)
 
         # 手部检测器
         self.tracker = HandTracker()
@@ -201,6 +260,22 @@ class SnakeGame:
         xmin, xmax, ymin, ymax = self.play_bounds()
         return self.clamp(x, xmin, xmax), self.clamp(y, ymin, ymax)
 
+    # ---------- PIL 绘图集成 ----------
+    def _draw_ui_overlay(self, frame: np.ndarray, draw_func) -> np.ndarray:
+        """
+        通用辅助：将 OpenCV Frame 转为 PIL，执行 draw_func(draw)，再转回 OpenCV。
+        """
+        # cv2 BGR -> PIL RGB
+        img_pil = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        # 创建 RGBA 层以便绘制半透明效果
+        img_pil = img_pil.convert("RGBA")
+        
+        draw = ImageDraw.Draw(img_pil)
+        draw_func(draw)
+        
+        # PIL RGBA -> cv2 BGR
+        return cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGBA2BGR)
+
     # ---------- 状态初始化 ----------
     def _init_state(self) -> None:
         xmin, xmax, ymin, ymax = self.play_bounds()
@@ -230,25 +305,6 @@ class SnakeGame:
             self.binding_complete = False
             self.rebinding = False
 
-    def _anchor_snake(self, idx: int, pos: PointI) -> None:
-        """把某条蛇的头放到 pos，身体向左展开，目标点也同步。"""
-        hx = self.clamp(int(pos[0]), 0, self.width - 1)
-        hy = self.clamp(int(pos[1]), 0, self.height - 1)
-        hx, hy = self.clamp_to_play(hx, hy)
-        body = [(hx - j * self.segment_length, hy) for j in range(self.min_segments)]
-        # 防御性扩展列表
-        while len(self.snakes) <= idx:
-            self.snakes.append([])
-        while len(self.target_pos) <= idx:
-            self.target_pos.append((hx, hy))
-        while len(self.game_overs) <= idx:
-            self.game_overs.append(False)
-        while len(self.last_move_times) <= idx:
-            self.last_move_times.append(0.0)
-        self.snakes[idx] = body
-        self.target_pos[idx] = (hx, hy)
-        self.game_overs[idx] = False
-        self.last_move_times[idx] = 0.0
 
     # ---------- 手槽匹配 ----------
     def _slot_active(self, idx: int, now_ts: float) -> bool:
@@ -286,25 +342,50 @@ class SnakeGame:
     def select_mode(self) -> bool:
         """选择单/双人模式的弹窗。"""
         win = "Mode Select"
-        canvas = np.zeros((360, 640, 3), np.uint8)
-        cv2.putText(canvas, "Hand Snake Game", (120, 80), cv2.FONT_HERSHEY_SIMPLEX, 1.4, (255, 255, 255), 3)
-        rules = [
-            "Rules (Dual):",
-            "- First to reach 10 points wins",
-            "- Green side hits itself => Yellow side wins",
-            "- Yellow side hits itself => Green side wins",
-            "- Snakes collide => Draw",
-        ]
-        for i, t in enumerate(rules):
-            cv2.putText(canvas, t, (40, 130 + i * 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 2)
-        cv2.putText(canvas, "1: Single (one hand -> one snake)", (60, 280), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-        cv2.putText(canvas, "2: Dual (left/right hand -> two snakes)", (60, 310), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 200, 200), 2)
-        cv2.putText(canvas, "Q / Esc: Quit", (60, 340), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
-
-        cv2.namedWindow(win, cv2.WINDOW_AUTOSIZE)
+        
         while True:
-            cv2.imshow(win, canvas)
-            key = cv2.waitKey(10) & 0xFF
+            # 创建纯黑背景
+            bg = np.zeros((360, 640, 3), np.uint8)
+            
+            def draw_menu(draw):
+                w, h = 640, 360
+                
+                # 标题
+                title = "Hand Snake Game"
+                # 计算居中
+                tb = draw.textbbox((0, 0), title, font=self.font_md)
+                tx, ty = (w - (tb[2]-tb[0])) // 2, 50
+                draw.text((tx, ty), title, font=self.font_md, fill=(255, 255, 255))
+                
+                # 选项
+                opts = [
+                    ("1: Single Player (One Hand)", (0, 255, 0)),
+                    ("2: Dual Player (Two Hands)", (0, 200, 200)),
+                    ("Q / Esc: Quit", (255, 100, 100))
+                ]
+                
+                start_y = 120
+                for i, (text, color) in enumerate(opts):
+                    tb = draw.textbbox((0, 0), text, font=self.font_sm)
+                    tw = tb[2] - tb[0]
+                    dx = (w - tw) // 2
+                    dy = start_y + i * 40
+                    # 绘制带背景的胶囊按钮
+                    bg_box = (dx - 20, dy - 5, dx + tw + 20, dy + 25)
+                    draw.rounded_rectangle(bg_box, radius=10, fill=(30, 30, 30, 255), outline=color, width=2)
+                    draw.text((dx, dy), text, font=self.font_sm, fill=(255, 255, 255))
+                
+                # 规则提示
+                rule_y = 260
+                rules = "Rules: Food=10 Win | Self-Crash=Lose"
+                rtb = draw.textbbox((0, 0), rules, font=self.font_sm)
+                rx = (w - (rtb[2]-rtb[0])) // 2
+                draw.text((rx, rule_y), rules, font=self.font_sm, fill=(180, 180, 180))
+
+            frame_show = self._draw_ui_overlay(bg, draw_menu)
+            cv2.imshow(win, frame_show)
+            
+            key = cv2.waitKey(20) & 0xFF
             if key == ord("1"):
                 self.mode = "single"
                 self.num_snakes = 1
@@ -343,34 +424,49 @@ class SnakeGame:
             hands = self.tracker.detect(frame)
             now_ts = time.time()
 
-            # 先把当前蛇的位置画出来，方便玩家将手指移到蛇头处绑定
-            self._draw_snakes_binding(frame)
-
-            cv2.putText(frame, "Binding players (Dual mode)", (40, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (255, 255, 255), 2)
-            cv2.putText(frame, "Move fingertip onto the snake head to bind.", (40, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 200), 2)
-            cv2.putText(frame, "Green=Player1  Orange=Player2", (40, 95), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-            cv2.putText(frame, "R: restart bind   Q/Esc: quit", (40, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 1)
-
-            # 当前蛇头位置（保持不动）
+            # 画当前蛇的位置
+            self._draw_snakes_core(frame, only_binding_visual=True)
+            
+            # 手槽检测
             heads = [self.snakes[0][0], self.snakes[1][0]]
 
             # 当帧按最近蛇头分配槽位
             self._assign_hands_to_slots(hands, heads, now_ts, bind_thresh)
-
+            
             both = self._slot_active(0, now_ts) and self._slot_active(1, now_ts)
+            msg_main = ""
+            msg_sub = ""
+            
             if both:
                 if not counting:
                     counting = True
                     countdown_start = time.time()
                 remain = 3 - (time.time() - countdown_start)
-                cv2.putText(frame, f"Both bound! Starting in {int(remain)+1}", (40, 150),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
+                msg_main = f"Starting in {int(remain)+1}..."
                 if remain <= 0:
                     self.binding_complete = True
                     return True
             else:
                 counting = False
+                msg_main = "Move fingers to snake heads"
+            
+            # 使用 PIL 绘制 UI
+            def draw_binding_ui(draw):
+                # 顶部标题栏
+                header_bg = (0, 0, 0, 120)
+                draw.rectangle((0, 0, self.width, 80), fill=header_bg)
+                draw.text((30, 20), "Dual Mode Binding", font=self.font_md, fill=(255, 255, 255))
+                
+                # 状态大字
+                color = (0, 255, 0) if both else (255, 200, 0)
+                draw.text((30, 80), msg_main, font=self.font_md, fill=color)
+                
+                # 底部提示
+                hints = "Green=Player1  Orange=Player2  |  Q/Esc: Quit  R: Reset"
+                draw_text_pill(draw, (30, self.height - 60), hints, self.font_sm)
 
+            frame = self._draw_ui_overlay(frame, draw_binding_ui)
+            
             cv2.imshow(win, frame)
             key = cv2.waitKey(1) & 0xFF
             if key in (ord("q"), ord("Q"), 27):
@@ -408,7 +504,6 @@ class SnakeGame:
         return (hx + ux * step, hy + uy * step)
 
     def rebuild_body(self, idx: int, new_head: PointF) -> None:
-        """按固定节距重建蛇身，保持平滑。"""
         pts = [new_head]
         prev = new_head
         for seg in self.snakes[idx][1:]:
@@ -443,192 +538,187 @@ class SnakeGame:
             self.snakes[idx].append(self.snakes[idx][-1])
             self.food = self.generate_food()
             if self.scores[idx] >= self.target_score:
-                for i in range(self.num_snakes):
-                    self.game_overs[i] = True
-                if self.num_snakes == 1:
-                    self.result_text = f"You win! Score {self.scores[0]} >= {self.target_score}"
-                else:
-                    self.result_text = "Green side wins by score" if idx == 0 else "Yellow side wins by score"
+                self._trigger_win(idx)
                 return
 
         # 重建身体
         self.rebuild_body(idx, new_head)
+        
+        # 碰撞检测
+        self._check_collisions(idx, new_head)
 
+    def _trigger_win(self, winner_idx: int) -> None:
+        for i in range(self.num_snakes):
+            self.game_overs[i] = True
+        if self.num_snakes == 1:
+            self.result_text = f"VICTORY! Score {self.scores[0]}"
+        else:
+            name = "Green" if winner_idx == 0 else "Yellow"
+            self.result_text = f"{name} Wins!"
+
+    def _check_collisions(self, idx: int, head: PointF) -> None:
         # 自撞
         for seg in self.snakes[idx][3:]:
-            if self.dist2(new_head, seg) < (self.head_radius + self.body_radius) ** 2:
-                self._handle_self_crash(idx)
+            if self.dist2(head, seg) < (self.head_radius + self.body_radius) ** 2:
+                self.game_overs[idx] = True
+                self._resolve_game_over(idx, "Self Collision")
                 return
-
+        
         # 互撞
         for j in range(self.num_snakes):
-            if j == idx:
-                continue
+            if j == idx: continue
             for seg in self.snakes[j]:
-                if self.dist2(new_head, seg) < (self.head_radius + self.body_radius) ** 2:
-                    self._handle_head_to_other(idx, j)
+                if self.dist2(head, seg) < (self.head_radius + self.body_radius) ** 2:
+                    self.game_overs[idx] = True
+                    self.game_overs[j] = True
+                    self.result_text = "Draw! Collision."
                     return
-
+        
         # 撞墙
-        x, y = new_head
+        x, y = head
         xmin, xmax, ymin, ymax = self.play_bounds()
-        if x - self.head_radius < xmin or x + self.head_radius > xmax or y - self.head_radius < ymin or y + self.head_radius > ymax:
-            self._handle_wall_hit(idx)
-            return
+        if x < xmin or x > xmax or y < ymin or y > ymax:
+            self.game_overs[idx] = True
+            self._resolve_game_over(idx, "Wall Hit")
 
-    def _handle_self_crash(self, idx: int) -> None:
-        self.game_overs[idx] = True
+    def _resolve_game_over(self, loser_idx: int, reason: str) -> None:
         if self.num_snakes == 1:
-            self.result_text = "You lost (self collision)"
+            self.result_text = f"Game Over ({reason})"
         else:
-            other = 1 - idx
-            self.game_overs[other] = True
-            self.result_text = (
-                "Yellow side wins! Green side crashed into itself."
-                if idx == 0
-                else "Green side wins! Yellow side crashed into itself."
-            )
-
-    def _handle_head_to_other(self, idx: int, other: int) -> None:
-        # 两条蛇都死 => 平局
-        self.game_overs[idx] = True
-        self.game_overs[other] = True
-        self.result_text = "Draw! Snakes crashed into each other."
-
-    def _handle_wall_hit(self, idx: int) -> None:
-        self.game_overs[idx] = True
-        if self.num_snakes == 1:
-            self.result_text = "You lost (hit wall)"
-        else:
-            other = 1 - idx
-            self.game_overs[other] = True
-            self.result_text = (
-                "Yellow side wins! Green side hit the wall."
-                if idx == 0
-                else "Green side wins! Yellow side hit the wall."
-            )
+            winner = 1 - loser_idx
+            self.game_overs[winner] = True # 游戏结束
+            w_name = "Yellow" if winner == 1 else "Green"
+            l_name = "Green" if loser_idx == 0 else "Yellow"
+            self.result_text = f"{w_name} Wins! ({l_name} {reason})"
 
     # ---------- 绘制 ----------
-    def draw(self, frame: np.ndarray) -> None:
+    def _draw_snakes_core(self, frame: np.ndarray, only_binding_visual: bool = False) -> None:
+        """使用 OpenCV 绘制蛇、食物、边界等几何图形（高性能）。"""
         canvas = np.zeros_like(frame)
         colors = [(0, 255, 0), (0, 200, 200)]
 
-        # 画 padding 区域（使可玩区域更明显）：上下左右各 10% 填充深色
+        # 边界 Padding
         xmin, xmax, ymin, ymax = self.play_bounds()
         pad_color = (30, 30, 30)
         alpha_pad = 0.6
         pad_layer = np.zeros_like(frame)
-        # 上（取消上方 padding）
         if self.pad_top > 0:
             cv2.rectangle(pad_layer, (0, 0), (self.width, ymin), pad_color, -1)
-        # 下（加大 padding）
         cv2.rectangle(pad_layer, (0, ymax + 1), (self.width, self.height), pad_color, -1)
-        # 左
         cv2.rectangle(pad_layer, (0, ymin), (xmin, ymax + 1), pad_color, -1)
-        # 右
         cv2.rectangle(pad_layer, (xmax + 1, ymin), (self.width, ymax + 1), pad_color, -1)
         frame[:] = cv2.addWeighted(pad_layer, alpha_pad, frame, 1 - alpha_pad, 0)
 
-        # 食物
-        cv2.circle(canvas, (int(self.food[0]), int(self.food[1])), self.food_radius, (0, 0, 255), -1)
-        cv2.circle(canvas, (int(self.food[0]), int(self.food[1])), self.food_radius, (255, 255, 255), 2)
+        # 食物 (仅游戏中绘制)
+        if not only_binding_visual:
+            cv2.circle(canvas, (int(self.food[0]), int(self.food[1])), self.food_radius, (0, 0, 255), -1)
+            cv2.circle(canvas, (int(self.food[0]), int(self.food[1])), self.food_radius, (255, 255, 255), 2)
 
         # 蛇
         for idx, snake in enumerate(self.snakes):
             base = colors[idx % len(colors)]
+            # 线
             if len(snake) > 1:
-                for i in range(len(snake) - 1):
-                    p1 = (int(snake[i][0]), int(snake[i][1]))
-                    p2 = (int(snake[i + 1][0]), int(snake[i + 1][1]))
-                    alpha = 0.6 - (i / len(snake)) * 0.3
-                    color = (base[0], int(base[1] * alpha), base[2])
-                    cv2.line(canvas, p1, p2, color, 12, cv2.LINE_AA)
+                pts = np.array([(int(p[0]), int(p[1])) for p in snake], np.int32)
+                cv2.polylines(canvas, [pts], False, base, 12, cv2.LINE_AA)
+            
+            # 关节
             for i, seg in enumerate(snake):
                 if i == 0:
                     color, r = base, self.head_radius
                 else:
+                    # 渐变尾巴
                     alpha = max(0.4, 1.0 - (i / len(snake)) * 0.6)
                     color = (base[0], int(220 * alpha), base[2])
                     r = max(6, int(self.body_radius * (0.9 - 0.4 * (i / len(snake)))))
                 cv2.circle(canvas, (int(seg[0]), int(seg[1])), r, color, -1)
-                cv2.circle(canvas, (int(seg[0]), int(seg[1])), r, (255, 255, 255), 1)
-            # 眼睛
+            
+            # 眼睛 & 识别圈
             hx, hy = int(snake[0][0]), int(snake[0][1])
             eye = max(2, self.head_radius // 4)
             for ex, ey in [(hx + eye, hy - eye), (hx + eye, hy + eye)]:
                 cv2.circle(canvas, (ex, ey), eye, (0, 0, 0), -1)
-            # 识别圈：提示手指需进入阈值内才能控制
-            cv2.circle(canvas, (hx, hy), BIND_DIST, (255, 255, 255), 2, cv2.LINE_AA)
+            
+            # 双人模式下的控制圈
+            if self.mode == "dual" or only_binding_visual:
+                cv2.circle(canvas, (hx, hy), BIND_DIST, (255, 255, 255), 2, cv2.LINE_AA)
 
-        # 叠加到原始帧
         cv2.addWeighted(canvas, 0.7, frame, 0.3, 0, frame)
 
-        # HUD：分数 + 目标分
-        cv2.putText(frame, f"Score Green: {self.scores[0]}", (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 3)
-        if self.num_snakes > 1:
-            cv2.putText(frame, f"Score Yellow: {self.scores[1]}", (10, 80), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 3)
-        cv2.putText(frame, f"Target: {self.target_score}", (10, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (200, 200, 200), 2)
+    def draw(self, frame: np.ndarray) -> None:
+        # 1. OpenCV 几何绘制
+        self._draw_snakes_core(frame)
 
-        if any(self.game_overs):
-            title = "Game Over"
-            msg = self.result_text or "Press R to restart"
-            hint = "Press R to restart, Q to quit"
-            self._center_text(frame, title, dy=-30, color=(0, 0, 255), scale=1.2, thick=3)
-            self._center_text(frame, msg, dy=10, color=(0, 0, 255), scale=0.9, thick=2)
-            self._center_text(frame, hint, dy=45, color=(255, 255, 255), scale=0.7, thick=2)
+        # 2. PIL UI 绘制
+        def draw_hud(draw):
+            # 分数板
+            score_text = f"P1 (Green): {self.scores[0]}"
+            draw_text_pill(draw, (20, 20), score_text, self.font_md, text_color=(100, 255, 100))
+            
+            if self.num_snakes > 1:
+                s2_text = f"P2 (Yellow): {self.scores[1]}"
+                draw_text_pill(draw, (20, 70), s2_text, self.font_md, text_color=(0, 255, 255))
+            
+            # 目标分
+            tgt_text = f"Target: {self.target_score}"
+            # 右上角绘制
+            tb = draw.textbbox((0, 0), tgt_text, font=self.font_md)
+            tx = self.width - (tb[2]-tb[0]) - 30
+            draw_text_pill(draw, (tx, 20), tgt_text, self.font_md, bg_color=(50, 50, 50, 180))
 
-    def _center_text(self, frame: np.ndarray, text: str, dy: int, color, scale=1.0, thick=2) -> None:
-        size = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, scale, thick)[0]
-        pos = ((frame.shape[1] - size[0]) // 2, frame.shape[0] // 2 + dy)
-        cv2.putText(frame, text, pos, cv2.FONT_HERSHEY_SIMPLEX, scale, color, thick)
+            # 暂停/状态提示
+            ui_center_x = self.width // 2
+            
+            if any(self.game_overs):
+                # 游戏结束面板
+                is_win = "VICTORY" in self.result_text or "Wins" in self.result_text
+                title = "VICTORY" if is_win else "GAME OVER"
+                theme_color = (50, 255, 50) if is_win else (255, 50, 50)  # Green for win, Red for loss
 
-    def _draw_snakes_binding(self, frame: np.ndarray) -> None:
-        """在绑定界面上绘制当前蛇的位置，方便手指对准蛇头。"""
-        colors = [(0, 255, 0), (0, 200, 200)]
-        xmin, xmax, ymin, ymax = self.play_bounds()
-        pad_color = (30, 30, 30)
-        alpha_pad = 0.6
-        pad_layer = np.zeros_like(frame)
-        if self.pad_top > 0:
-            cv2.rectangle(pad_layer, (0, 0), (self.width, ymin), pad_color, -1)
-        cv2.rectangle(pad_layer, (0, ymax + 1), (self.width, self.height), pad_color, -1)
-        cv2.rectangle(pad_layer, (0, ymin), (xmin, ymax + 1), pad_color, -1)
-        cv2.rectangle(pad_layer, (xmax + 1, ymin), (self.width, ymax + 1), pad_color, -1)
-        frame[:] = cv2.addWeighted(pad_layer, alpha_pad, frame, 1 - alpha_pad, 0)
-
-        for idx, snake in enumerate(self.snakes):
-            base = colors[idx % len(colors)]
-            # 画身体线
-            if len(snake) > 1:
-                for i in range(len(snake) - 1):
-                    p1 = (int(snake[i][0]), int(snake[i][1]))
-                    p2 = (int(snake[i + 1][0]), int(snake[i + 1][1]))
-                    alpha = 0.6 - (i / len(snake)) * 0.3
-                    color = (base[0], int(base[1] * alpha), base[2])
-                    cv2.line(frame, p1, p2, color, 12, cv2.LINE_AA)
-            # 画节点
-            for i, seg in enumerate(snake):
-                if i == 0:
-                    color, r = base, self.head_radius
+                sub = self.result_text
+                hint = "Press R to Restart or Q to Return to Menu"
+                
+                # 计算总高度
+                h_title = 80
+                h_sub = 40
+                h_hint = 30
+                total_h = h_title + h_sub + h_hint + 40
+                
+                center_y = self.height // 2
+                panel_rect = (ui_center_x - 300, center_y - total_h//2 - 20, ui_center_x + 300, center_y + total_h//2 + 20)
+                draw.rounded_rectangle(panel_rect, radius=20, fill=(0, 0, 0, 200), outline=theme_color, width=3)
+                
+                # Title
+                tb = draw.textbbox((0, 0), title, font=self.font_lg)
+                draw.text((ui_center_x - (tb[2]-tb[0])//2, center_y - total_h//2), title, font=self.font_lg, fill=theme_color)
+                # Sub
+                tb = draw.textbbox((0, 0), sub, font=self.font_md)
+                draw.text((ui_center_x - (tb[2]-tb[0])//2, center_y - 10), sub, font=self.font_md, fill=(255, 255, 255))
+                # Hint
+                tb = draw.textbbox((0, 0), hint, font=self.font_sm)
+                draw.text((ui_center_x - (tb[2]-tb[0])//2, center_y + 40), hint, font=self.font_sm, fill=(200, 200, 200))
+            
+            elif self.manual_paused or self.auto_paused:
+                # 暂停提示
+                status = "PAUSED"
+                if self.auto_paused:
+                    if self.mode == "single":
+                        detail = "Hand Lost - Return to view"
+                    else:
+                        detail = "Hand Lost - Rebind or Resume" if self.need_rebind_prompt else "Waiting for hands..."
                 else:
-                    alpha = max(0.4, 1.0 - (i / len(snake)) * 0.6)
-                    color = (base[0], int(220 * alpha), base[2])
-                    r = max(6, int(self.body_radius * (0.9 - 0.4 * (i / len(snake)))))
-                cv2.circle(frame, (int(seg[0]), int(seg[1])), r, color, -1)
-                cv2.circle(frame, (int(seg[0]), int(seg[1])), r, (255, 255, 255), 1)
-            # 画眼睛
-            hx, hy = int(snake[0][0]), int(snake[0][1])
-            eye = max(2, self.head_radius // 4)
-            for ex, ey in [(hx + eye, hy - eye), (hx + eye, hy + eye)]:
-                cv2.circle(frame, (ex, ey), eye, (0, 0, 0), -1)
-            # 识别圈：提示手指需进入阈值内才能控制
-            cv2.circle(frame, (hx, hy), BIND_DIST, (255, 255, 255), 2, cv2.LINE_AA)
+                    detail = "Manual Pause (Press Space)"
+                
+                # 简单的居中胶囊
+                draw_text_pill(draw, (ui_center_x - 150, 150), f"{status}: {detail}", self.font_md, bg_color=(0, 0, 100, 200))
+
+        # 执行混合
+        frame[:] = self._draw_ui_overlay(frame, draw_hud)
 
     # ---------- 主循环 ----------
     def run(self) -> None:
-        print("贪吃蛇（连续坐标，无网格版）启动")
-        print("在弹出的窗口中按 1 选择单人，2 选择双人，Q/Esc 退出")
-
+        print("贪吃蛇（Pillow UI版）启动")
+        
         running = True
         while running:
             # 模式选择：返回 False 代表真正退出
@@ -641,7 +731,7 @@ class SnakeGame:
             cv2.setWindowProperty(win, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
             self._init_state()
 
-        # 双人模式开局绑定
+            # 双人模式开局绑定
             if self.mode == "dual":
                 if not self.bind_players(win):
                     cv2.destroyAllWindows()
@@ -665,7 +755,13 @@ class SnakeGame:
                 hands = self.tracker.detect(frame)
                 # 2) 每帧按距离最近的蛇头分配槽位（含缓冲）
                 heads = [snake[0] for snake in self.snakes[: self.num_snakes]]
-                self._assign_hands_to_slots(hands, heads, now_ts, BIND_DIST)
+                
+                # 逻辑：单人模式无限距离，双人模式保持限制
+                dist_threshold = BIND_DIST
+                if self.mode == "single":
+                    dist_threshold = 5000
+
+                self._assign_hands_to_slots(hands, heads, now_ts, dist_threshold)
 
                 # 3) 计算槽位是否仍在“有效期”（2 秒内）
                 active = [self._slot_active(i, now_ts) for i in range(self.num_snakes)]
@@ -694,19 +790,8 @@ class SnakeGame:
                             self.move_snake(i)
 
                 self.draw(frame)
-                if paused:
-                    cv2.putText(frame, "Paused", (self.width // 2 - 80, 80), cv2.FONT_HERSHEY_SIMPLEX, 1.4, (0, 0, 255), 3)
-                    if self.auto_paused:
-                        if self.mode == "single":
-                            msg = "No hand detected"
-                        else:
-                            if self.need_rebind_prompt:
-                                msg = "Hand lost: Space=rebind  R=restart  Q=mode select"
-                            else:
-                                msg = "Need two hands (Green+Yellow) to continue"
-                        cv2.putText(frame, msg, (self.width // 2 - 250, 120), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
-
                 cv2.imshow(win, frame)
+                
                 key = cv2.waitKey(1) & 0xFF
                 if key in (ord("q"), ord("Q")):
                     # 返回模式选择
@@ -727,7 +812,6 @@ class SnakeGame:
                         self.need_rebind_prompt = False
                         self.manual_paused = False
                         self.auto_paused = False
-                        continue
                     else:
                         self.manual_paused = not self.manual_paused
 
@@ -742,7 +826,7 @@ class SnakeGame:
                 # 摄像头读帧失败等致命错误，直接退出
                 running = False
             elif back_to_menu:
-                # 回到最外层 while，再次弹出模式选择
+                # 返回模式选择
                 continue
             else:
                 # 其它情况（例如窗口被关闭），也直接结束
@@ -762,4 +846,3 @@ class SnakeGame:
 
 if __name__ == "__main__":
     SnakeGame().run()
-
