@@ -21,13 +21,14 @@
 
 """
 
-from __future__ import annotations
+from __future__ import annotations #在jetson上要注释掉
 import random
 import time
 from typing import Dict, List, Optional, Tuple
 import cv2
 import mediapipe as mp
 import numpy as np
+from PIL import Image, ImageDraw, ImageFont
 
 # -------------------- 可调配置 --------------------
 USE_JETSON = False
@@ -57,6 +58,47 @@ BIND_DIST = 80          # 双人模式下的控制圈半径
 
 PointF = Tuple[float, float]
 PointI = Tuple[int, int]
+
+
+def get_safe_font(size: int) -> ImageFont.ImageFont:
+    """跨平台安全加载字体，找不到时回退到默认字体。"""
+    candidates = [
+        "Arial.ttf",
+        "/System/Library/Fonts/Supplemental/Arial.ttf",  # macOS
+        "C:/Windows/Fonts/arial.ttf",                   # Windows
+        "DejaVuSans.ttf",                               # Linux / Jetson
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+    ]
+
+    for font_path in candidates:
+        try:
+            return ImageFont.truetype(font_path, size)
+        except IOError:
+            continue
+
+    print("Warning: Custom fonts not found, using default.")
+    return ImageFont.load_default()
+
+
+def draw_text_pill(
+    draw: ImageDraw.ImageDraw,
+    pos: Tuple[int, int],
+    text: str,
+    font: ImageFont.ImageFont,
+    text_color: Tuple[int, int, int] = (255, 255, 255),
+    bg_color: Tuple[int, int, int, int] = (0, 0, 0, 160),
+    padding: int = 10,
+) -> None:
+    """在 PIL 画布上绘制带圆角半透明背景的文字。"""
+    x, y = pos
+    bbox = draw.textbbox((0, 0), text, font=font)
+    w = bbox[2] - bbox[0]
+    h = bbox[3] - bbox[1]
+
+    bg_box = (x - padding, y - padding, x + w + padding, y + h + padding)
+    draw.rounded_rectangle(bg_box, radius=8, fill=bg_color)
+    draw.text((x, y), text, font=font, fill=text_color)
 
 def gstreamer_pipeline(sensor_id=0, sensor_mode=4, capture_width=1280, capture_height=720, display_width=1280, display_height=720, framerate=30, flip_method=2) -> str:
     return f"nvarguscamerasrc sensor-id={sensor_id} sensor-mode={sensor_mode} ! video/x-raw(memory:NVMM), width=(int){capture_width}, height=(int){capture_height}, format=(string)NV12, framerate=(fraction){framerate}/1 ! nvvidconv flip-method={flip_method} ! video/x-raw, width=(int){display_width}, height=(int){display_height}, format=(string)BGRx ! videoconvert ! video/x-raw, format=(string)BGR ! appsink"
@@ -126,6 +168,11 @@ class SnakeGame:
 
         self.dual_winner = -1
 
+        # 字体资源（仅用于 UI，逻辑不依赖）
+        self.font_lg = get_safe_font(60)
+        self.font_md = get_safe_font(32)
+        self.font_sm = get_safe_font(20)
+
         self.tracker = HandTracker()
         self.hand_slots = [None, None]
         self.binding_complete = False
@@ -140,6 +187,14 @@ class SnakeGame:
             self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
 
         self._init_state()
+
+    def _draw_ui_overlay(self, frame: np.ndarray, draw_func) -> np.ndarray:
+        """通用：将 OpenCV 帧交给 PIL 绘制 UI 覆盖层。"""
+        img_pil = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        img_pil = img_pil.convert("RGBA")
+        draw = ImageDraw.Draw(img_pil)
+        draw_func(draw)
+        return cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGBA2BGR)
 
     def play_bounds(self):
         return self.pad_x, self.width - self.pad_x - 1, self.pad_top, self.height - self.pad_bottom - 1
@@ -191,24 +246,55 @@ class SnakeGame:
             self.binding_complete = False
 
     def select_mode(self) -> bool:
+        """模式选择界面：使用 Pillow 美化菜单 UI。"""
         win = "Mode Select"
-        canvas = np.zeros((450, 700, 3), np.uint8)
+
         while True:
-            canvas[:] = 0
-            cv2.putText(canvas, "AI Snake Game", (220, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255, 255, 255), 3)
+            bg = np.zeros((360, 640, 3), np.uint8)
 
-            cv2.putText(canvas, "1: Single Player (Stage Mode)", (40, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-            cv2.putText(canvas, "   - Reach Target Score to pass.", (40, 130), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
-            cv2.putText(canvas, "   - Safe Wall: You won't die hitting walls.", (40, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+            def draw_menu(draw: ImageDraw.ImageDraw) -> None:
+                w, h = 640, 360
 
-            cv2.putText(canvas, "2: Dual Player (Battle)", (40, 200), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 200), 2)
-            cv2.putText(canvas, "   - Hit Wall = LOSE immediately.", (40, 230), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
-            cv2.putText(canvas, "   - Head hit Body -> Steal Tail.", (40, 250), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+                # 标题
+                title = "AI Snake Game"
+                tb = draw.textbbox((0, 0), title, font=self.font_md)
+                tw = tb[2] - tb[0]
+                draw.text(((w - tw) // 2, 30), title, font=self.font_md, fill=(255, 255, 255))
 
-            cv2.putText(canvas, "Q / Esc: Quit", (40, 380), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+                # 单人模式
+                single_title = "1: Single Player (Stage Mode)"
+                single_desc1 = "- Clear levels by reaching target score"
+                single_desc2 = "- Safe Wall: hitting walls won't kill you"
 
-            cv2.imshow(win, canvas)
-            key = cv2.waitKey(10) & 0xFF
+                y0 = 90
+                box_w = w - 80
+                box = (40, y0 - 10, 40 + box_w, y0 + 80)
+                draw.rounded_rectangle(box, radius=12, fill=(20, 40, 20, 220), outline=(0, 200, 0), width=2)
+
+                draw.text((60, y0), single_title, font=self.font_sm, fill=(180, 255, 180))
+                draw.text((70, y0 + 25), single_desc1, font=self.font_sm, fill=(220, 220, 220))
+                draw.text((70, y0 + 45), single_desc2, font=self.font_sm, fill=(220, 220, 220))
+
+                # 双人模式
+                dual_title = "2: Dual Player (Battle)"
+                dual_desc1 = "- Hit wall = immediate lose"
+                dual_desc2 = "- Head hits body -> steal tail"
+
+                y1 = 190
+                box2 = (40, y1 - 10, 40 + box_w, y1 + 80)
+                draw.rounded_rectangle(box2, radius=12, fill=(20, 35, 40, 220), outline=(0, 200, 200), width=2)
+
+                draw.text((60, y1), dual_title, font=self.font_sm, fill=(180, 255, 255))
+                draw.text((70, y1 + 25), dual_desc1, font=self.font_sm, fill=(220, 220, 220))
+                draw.text((70, y1 + 45), dual_desc2, font=self.font_sm, fill=(220, 220, 220))
+
+                # 退出提示
+                footer = "Q / Esc: Quit"
+                draw_text_pill(draw, (40, 310), footer, self.font_sm, text_color=(255, 120, 120))
+
+            frame_show = self._draw_ui_overlay(bg, draw_menu)
+            cv2.imshow(win, frame_show)
+            key = cv2.waitKey(20) & 0xFF
             if key == ord("1"):
                 self.mode = "single"
                 self.num_snakes = 1
@@ -236,17 +322,17 @@ class SnakeGame:
             hands = self.tracker.detect(frame)
 
             self._draw_snakes_simple(frame)
-            cv2.putText(frame, "Binding (Place finger on head)", (40, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (255,255,255), 2)
-
             heads = [s[0] for s in self.snakes]
             self._assign_hands(hands, heads, time.time())
 
-            if self._slot_active(0, time.time()) and self._slot_active(1, time.time()):
+            both_active = self._slot_active(0, time.time()) and self._slot_active(1, time.time())
+
+            if both_active:
                 if not counting:
                     counting = True
                     start_t = time.time()
                 rem = 3 - (time.time() - start_t)
-                cv2.putText(frame, f"Starting in {int(rem)+1}...", (40, 100), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0,255,0), 3)
+                msg_main = f"Starting in {int(rem)+1}..."
                 if rem <= 0:
                     self.binding_complete = True
                     self.level_start_time = time.time()
@@ -254,6 +340,28 @@ class SnakeGame:
                     return True
             else:
                 counting = False
+                msg_main = "Move fingers onto each snake head"
+
+            # 使用 Pillow 绘制绑定提示 UI 覆盖层
+            def draw_binding_ui(draw: ImageDraw.ImageDraw) -> None:
+                w, h = frame.shape[1], frame.shape[0]
+
+                # 顶部半透明标题栏
+                draw.rectangle((0, 0, w, 80), fill=(0, 0, 0, 150))
+                title = "Dual Mode Binding"
+                tb = draw.textbbox((0, 0), title, font=self.font_md)
+                tw = tb[2] - tb[0]
+                draw.text(((w - tw) // 2, 20), title, font=self.font_md, fill=(255, 255, 255))
+
+                # 主提示信息
+                color = (120, 255, 120) if both_active else (255, 220, 120)
+                draw_text_pill(draw, (40, 90), msg_main, self.font_md, text_color=color)
+
+                # 底部操作说明
+                hint = "Place fingers on two heads | R: Rebind  Q/Esc: Quit"
+                draw_text_pill(draw, (40, h - 70), hint, self.font_sm, text_color=(200, 200, 200))
+
+            frame = self._draw_ui_overlay(frame, draw_binding_ui)
 
             cv2.imshow(win, frame)
             k = cv2.waitKey(1)
@@ -452,63 +560,188 @@ class SnakeGame:
         colors = [(0, 255, 0), (0, 200, 200)]
 
         xm, xM, ym, yM = self.play_bounds()
-        cv2.rectangle(frame, (xm, ym), (xM, yM), (50,50,50), 2)
+        cv2.rectangle(frame, (xm, ym), (xM, yM), (50, 50, 50), 2)
 
+        # 食物与蛇仍然用 OpenCV 绘制，保证性能与原有观感
         cv2.circle(canvas, self.food, self.food_radius, (0, 0, 255), -1)
 
         for idx, snake in enumerate(self.snakes):
-            if not snake: continue
+            if not snake:
+                continue
             base = colors[idx]
             if len(snake) > 1:
                 pts = np.array(snake, np.int32).reshape((-1, 1, 2))
                 cv2.polylines(canvas, [pts], False, base, 12, cv2.LINE_AA)
             for i, p in enumerate(snake):
-                r = self.head_radius if i==0 else max(6, int(self.body_radius*(0.9-0.4*(i/len(snake)))))
-                col = base if i==0 else (base[0], int(base[1]*0.8), base[2])
+                r = self.head_radius if i == 0 else max(
+                    6, int(self.body_radius * (0.9 - 0.4 * (i / len(snake))))
+                )
+                col = base if i == 0 else (base[0], int(base[1] * 0.8), base[2])
                 cv2.circle(canvas, (int(p[0]), int(p[1])), r, col, -1)
 
             head_pt = (int(snake[0][0]), int(snake[0][1]))
-            cv2.circle(canvas, head_pt, self.head_radius, (255,255,255), 2)
+            cv2.circle(canvas, head_pt, self.head_radius, (255, 255, 255), 2)
 
             if self.mode == "dual":
                 cv2.circle(frame, head_pt, BIND_DIST, (200, 200, 200), 1, cv2.LINE_AA)
                 if self._slot_active(idx, time.time()):
-                     cv2.circle(frame, head_pt, BIND_DIST, base, 2, cv2.LINE_AA)
+                    cv2.circle(frame, head_pt, BIND_DIST, base, 2, cv2.LINE_AA)
 
         cv2.addWeighted(canvas, 0.7, frame, 0.3, 0, frame)
 
         elapsed = self.get_elapsed_time()
 
-        if self.mode == "single":
-            cfg = SINGLE_LEVELS[self.current_level_idx]
-            rem_time = max(0, cfg["time"] - elapsed)
-            target = cfg["score"]
-            current = self.scores[0]
+        # 使用 Pillow 绘制 HUD 与提示面板
+        def draw_hud(draw: ImageDraw.ImageDraw) -> None:
+            if self.mode == "single":
+                cfg = SINGLE_LEVELS[self.current_level_idx]
+                rem_time = max(0, cfg["time"] - elapsed)
+                target = cfg["score"]
+                current = self.scores[0]
 
-            cv2.putText(frame, f"Level {self.current_level_idx+1}/10", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (255,255,255), 2)
-            cv2.putText(frame, f"Goal: {target}  Current: {current}", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,255,0), 2)
+                draw_text_pill(
+                    draw,
+                    (20, 20),
+                    f"Level {self.current_level_idx + 1}/10",
+                    self.font_md,
+                    text_color=(255, 255, 255),
+                )
+                draw_text_pill(
+                    draw,
+                    (20, 70),
+                    f"Goal: {target}  Current: {current}",
+                    self.font_md,
+                    text_color=(100, 255, 100),
+                )
 
-            time_col = (0,255,255) if rem_time > 10 else (0,0,255)
-            cv2.putText(frame, f"Time: {rem_time}s", (20, 120), cv2.FONT_HERSHEY_SIMPLEX, 1, time_col, 2)
-        else:
-            rem_time = max(0, DUAL_GAME_DURATION - elapsed)
-            cv2.putText(frame, f"P1(Green): {self.scores[0]}", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,255,0), 2)
-            cv2.putText(frame, f"P2(Yellow): {self.scores[1]}", (self.width-250, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,200,200), 2)
-            cv2.putText(frame, f"Win Length: {DUAL_TARGET_LENGTH}", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200,200,200), 1)
-            cv2.putText(frame, f"Time: {rem_time}s", (self.width//2-60, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, (255,255,255), 2)
+                time_col = (0, 255, 255) if rem_time > 10 else (255, 80, 80)
+                draw_text_pill(
+                    draw,
+                    (20, 120),
+                    f"Time: {rem_time}s",
+                    self.font_md,
+                    text_color=time_col,
+                )
+            else:
+                rem_time = max(0, DUAL_GAME_DURATION - elapsed)
+                draw_text_pill(
+                    draw,
+                    (20, 20),
+                    f"P1(Green): {self.scores[0]}",
+                    self.font_md,
+                    text_color=(100, 255, 100),
+                )
+                # 右上角玩家 2
+                p2_text = f"P2(Yellow): {self.scores[1]}"
+                bbox = draw.textbbox((0, 0), p2_text, font=self.font_md)
+                tw = bbox[2] - bbox[0]
+                draw_text_pill(
+                    draw,
+                    (self.width - tw - 40, 20),
+                    p2_text,
+                    self.font_md,
+                    text_color=(0, 255, 255),
+                )
+                draw_text_pill(
+                    draw,
+                    (20, 70),
+                    f"Win Length: {DUAL_TARGET_LENGTH}",
+                    self.font_sm,
+                    text_color=(220, 220, 220),
+                )
+                time_text = f"Time: {rem_time}s"
+                bbox = draw.textbbox((0, 0), time_text, font=self.font_md)
+                tw = bbox[2] - bbox[0]
+                draw_text_pill(
+                    draw,
+                    (self.width // 2 - tw // 2, 20),
+                    time_text,
+                    self.font_md,
+                    text_color=(255, 255, 255),
+                )
 
-        if any(self.game_overs) and self.result_text:
-            sz = cv2.getTextSize(self.result_text, cv2.FONT_HERSHEY_SIMPLEX, 1.5, 3)[0]
-            cx = (self.width - sz[0]) // 2
-            cy = self.height // 2
-            cv2.putText(frame, self.result_text, (cx, cy), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0,0,255), 3)
-            cv2.putText(frame, "Press R to Restart, Q to Quit", (cx+20, cy+50), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,255,255), 2)
-        elif self.sub_text:
-            cv2.putText(frame, self.sub_text, (self.width//2-150, self.height//2), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (255,255,0), 2)
-            if time.time() - self.level_start_time > 2: self.sub_text = ""
+            center_x = self.width // 2
+            center_y = self.height // 2
 
-        if (self.auto_paused or self.manual_paused) and not any(self.game_overs):
-            cv2.putText(frame, "PAUSED (Hand Lost or Space)", (self.width//2-200, self.height//2), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,0,255), 2)
+            if any(self.game_overs) and self.result_text:
+                title = "RESULT"
+                hint = "Press R to Restart, Q to Quit"
+
+                # 外层面板
+                panel_w = 600
+                panel_h = 200
+                panel_box = (
+                    center_x - panel_w // 2,
+                    center_y - panel_h // 2,
+                    center_x + panel_w // 2,
+                    center_y + panel_h // 2,
+                )
+                draw.rounded_rectangle(
+                    panel_box,
+                    radius=20,
+                    fill=(0, 0, 0, 210),
+                    outline=(255, 255, 255),
+                    width=3,
+                )
+
+                # 标题
+                tb = draw.textbbox((0, 0), title, font=self.font_lg)
+                tw = tb[2] - tb[0]
+                th = tb[3] - tb[1]
+                draw.text(
+                    (center_x - tw // 2, center_y - panel_h // 2 + 15),
+                    title,
+                    font=self.font_lg,
+                    fill=(255, 215, 0),
+                )
+
+                # 结果文本
+                tb = draw.textbbox((0, 0), self.result_text, font=self.font_md)
+                tw = tb[2] - tb[0]
+                draw.text(
+                    (center_x - tw // 2, center_y - 10),
+                    self.result_text,
+                    font=self.font_md,
+                    fill=(255, 255, 255),
+                )
+
+                # 提示
+                tb = draw.textbbox((0, 0), hint, font=self.font_sm)
+                tw = tb[2] - tb[0]
+                draw.text(
+                    (center_x - tw // 2, center_y + panel_h // 2 - 40),
+                    hint,
+                    font=self.font_sm,
+                    fill=(200, 200, 200),
+                )
+            elif self.sub_text:
+                tb = draw.textbbox((0, 0), self.sub_text, font=self.font_md)
+                tw = tb[2] - tb[0]
+                draw_text_pill(
+                    draw,
+                    (center_x - tw // 2, center_y - 20),
+                    self.sub_text,
+                    self.font_md,
+                    text_color=(255, 255, 0),
+                )
+
+            if (self.auto_paused or self.manual_paused) and not any(self.game_overs):
+                text = "PAUSED (Hand Lost or Space)"
+                tb = draw.textbbox((0, 0), text, font=self.font_md)
+                tw = tb[2] - tb[0]
+                draw_text_pill(
+                    draw,
+                    (center_x - tw // 2, center_y - 60),
+                    text,
+                    self.font_md,
+                    text_color=(255, 80, 80),
+                )
+
+        # 保持原有 sub_text 的 2 秒自动消失逻辑
+        if self.sub_text and time.time() - self.level_start_time > 2:
+            self.sub_text = ""
+
+        frame[:] = self._draw_ui_overlay(frame, draw_hud)
 
     def _draw_snakes_simple(self, frame):
         colors = [(0, 255, 0), (0, 200, 200)]
@@ -522,6 +755,9 @@ class SnakeGame:
             if not self.select_mode(): break
             win = "Snake Game"
             cv2.namedWindow(win, cv2.WINDOW_NORMAL)
+            # 初始窗口大小设为游戏分辨率，后续如果用户全屏或拉伸，
+            # 我们会在显示时做等比例缩放并加黑边，避免出现灰条。
+            cv2.resizeWindow(win, self.width, self.height)
             self._init_state()
 
             if self.mode == "dual":
@@ -567,7 +803,25 @@ class SnakeGame:
 
                 self.draw(frame)
 
-                cv2.imshow(win, frame)
+                # 等比例缩放并居中显示，窗口多余区域填充为黑色，避免右侧灰条
+                display = frame
+                try:
+                    _, _, win_w, win_h = cv2.getWindowImageRect(win)
+                    if win_w > 0 and win_h > 0 and (win_w != self.width or win_h != self.height):
+                        scale = min(win_w / self.width, win_h / self.height)
+                        new_w = max(1, int(self.width * scale))
+                        new_h = max(1, int(self.height * scale))
+                        resized = cv2.resize(frame, (new_w, new_h))
+                        display = np.zeros((win_h, win_w, 3), dtype=np.uint8)
+                        x0 = (win_w - new_w) // 2
+                        y0 = (win_h - new_h) // 2
+                        display[y0:y0 + new_h, x0:x0 + new_w] = resized
+                    else:
+                        display = frame
+                except Exception:
+                    display = frame
+
+                cv2.imshow(win, display)
                 k = cv2.waitKey(1) & 0xFF
                 if k in (ord('q'), ord('Q')):
                     cv2.destroyWindow(win)
