@@ -1,10 +1,8 @@
 """
-手势贪吃蛇（进阶版：即时闯关 + 策略对战）
 ==================================================
-
 玩法概述
 ----------------------------------
-- 单人模式（闯关）：
+- 单人模式（简单模式闯关，困难模式食物只存在3秒）：
     - 机制：共10关，每关独立计分。
     - 规则：在规定时间内需要吃到目标数量的食物。
     - 胜利：一旦达到目标分数 -> 立即通关进入下一关（无需等待时间结束）。
@@ -16,70 +14,105 @@
     - 失败：身体长度小于3（被吃掉太多了，初始为6）。
     - 物理：互撞头平局；撞身吃尾巴；撞墙输；自撞安全。
 
+更新说明：
+1.单人模式增加困难模式（食物三秒消失）；
+2.不同类型食物得分不同，吃毒药死；
+3.可以同时出现多个食物；
+4.UI改了一下可以再调整.
 -------------------------------------
 依赖：pip install -r requirements.txt
 
 """
 
-from __future__ import annotations #在jetson上要注释掉
+from __future__ import annotations
 import random
 import time
+import math
 from typing import Dict, List, Optional, Tuple
 import cv2
 import mediapipe as mp
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
-# -------------------- 可调配置 --------------------
+# -------------------- 配置与常量 --------------------
 USE_JETSON = False
 
-# --- 单人模式关卡配置 (10关) ---
+# 颜色定义 (RGB) - 马卡龙色系
+COL_BG_BLUE = (224, 247, 250)   # 浅蓝背景
+COL_SNAKE_BODY = (179, 229, 252) # 蛇身浅蓝
+COL_SNAKE_BORDER = (100, 180, 220) # 蛇身边框
+COL_HUD_BG = (255, 240, 245)    # HUD 背景浅粉
+COL_PROGRESS_OK = (144, 238, 144) # 进度条绿
+COL_PROGRESS_LOW = (255, 99, 71)  # 进度条红
+
+# 食物配置
+FOOD_TYPES = {
+    'insect': {'score': 1, 'color': (165, 214, 167), 'prob': 0.5}, # 浅绿
+    'fish':   {'score': 2, 'color': (144, 202, 249), 'prob': 0.3}, # 浅蓝
+    'mouse':  {'score': 3, 'color': (255, 224, 130), 'prob': 0.15}, # 浅黄
+    'poison': {'score': 0, 'color': (206, 147, 216), 'prob': 0.05}  # 浅紫
+}
+
+# 游戏参数
 SINGLE_LEVELS = [
-    {"time": 60, "score": 5},   # Level 1
-    {"time": 60, "score": 8},   # Level 2
-    {"time": 50, "score": 8},   # Level 3
-    {"time": 50, "score": 10},  # Level 4
-    {"time": 50, "score": 12},  # Level 5
-    {"time": 50, "score": 15},  # Level 6
-    {"time": 40, "score": 15},  # Level 7
-    {"time": 40, "score": 16},  # Level 8
-    {"time": 30, "score": 16},  # Level 9
-    {"time": 30, "score": 20},  # Level 10
+    {"time": 60, "score": 5}, {"time": 60, "score": 8},
+    {"time": 50, "score": 8}, {"time": 50, "score": 10},
+    {"time": 50, "score": 12}, {"time": 50, "score": 15},
+    {"time": 40, "score": 15}, {"time": 40, "score": 16},
+    {"time": 30, "score": 16}, {"time": 30, "score": 20},
 ]
-
-# --- 双人模式配置 ---
-DUAL_GAME_DURATION = 120    # 秒
-DUAL_TARGET_LENGTH = 20     # 目标长度
-
-# --- 基础参数 ---
-PADDING_RATIO = 0.10
+DUAL_GAME_DURATION = 120
+DUAL_TARGET_LENGTH = 30
+PADDING_RATIO = 0.05
 HAND_LOSS_GRACE = 2.0
-BIND_DIST = 80          # 双人模式下的控制圈半径
+BIND_DIST = 80
+HARD_MODE_FOOD_TIME = 3.0 # 食物存在3秒
+HUD_HEIGHT = 100
 
 PointF = Tuple[float, float]
 PointI = Tuple[int, int]
 
+# -------------------- 辅助类 --------------------
+
+class Particle:
+    def __init__(self, x, y, color):
+        self.x = x
+        self.y = y
+        self.color = color
+        angle = random.uniform(0, 2 * math.pi)
+        speed = random.uniform(2, 8)
+        self.vx = math.cos(angle) * speed
+        self.vy = math.sin(angle) * speed
+        self.life = 1.0
+        self.decay = random.uniform(0.05, 0.1)
+
+    def update(self):
+        self.x += self.vx
+        self.y += self.vy
+        self.life -= self.decay
+
+    def is_dead(self):
+        return self.life <= 0
+
+class FoodItem:
+    def __init__(self, pos, ftype, spawn_time):
+        self.pos = pos
+        self.type = ftype
+        self.spawn_time = spawn_time
+        self.active = True
 
 def get_safe_font(size: int) -> ImageFont.ImageFont:
-    """跨平台安全加载字体，找不到时回退到默认字体。"""
     candidates = [
-        "Arial.ttf",
-        "/System/Library/Fonts/Supplemental/Arial.ttf",  # macOS
-        "C:/Windows/Fonts/arial.ttf",                   # Windows
-        "DejaVuSans.ttf",                               # Linux / Jetson
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+        "calibrib.ttf", "segoeui.ttf", "msyh.ttc", "simhei.ttf", "arial.ttf",
+        "/System/Library/Fonts/HelveticaNeue.ttc",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
     ]
-
     for font_path in candidates:
         try:
             return ImageFont.truetype(font_path, size)
         except IOError:
             continue
-
-    print("Warning: Custom fonts not found, using default.")
     return ImageFont.load_default()
-
 
 def draw_text_pill(
     draw: ImageDraw.ImageDraw,
@@ -90,12 +123,10 @@ def draw_text_pill(
     bg_color: Tuple[int, int, int, int] = (0, 0, 0, 160),
     padding: int = 10,
 ) -> None:
-    """在 PIL 画布上绘制带圆角半透明背景的文字。"""
     x, y = pos
     bbox = draw.textbbox((0, 0), text, font=font)
     w = bbox[2] - bbox[0]
     h = bbox[3] - bbox[1]
-
     bg_box = (x - padding, y - padding, x + w + padding, y + h + padding)
     draw.rounded_rectangle(bg_box, radius=8, fill=bg_color)
     draw.text((x, y), text, font=font, fill=text_color)
@@ -104,28 +135,24 @@ def gstreamer_pipeline(sensor_id=0, sensor_mode=4, capture_width=1280, capture_h
     return f"nvarguscamerasrc sensor-id={sensor_id} sensor-mode={sensor_mode} ! video/x-raw(memory:NVMM), width=(int){capture_width}, height=(int){capture_height}, format=(string)NV12, framerate=(fraction){framerate}/1 ! nvvidconv flip-method={flip_method} ! video/x-raw, width=(int){display_width}, height=(int){display_height}, format=(string)BGRx ! videoconvert ! video/x-raw, format=(string)BGR ! appsink"
 
 class HandTracker:
-    """手部检测器封装类"""
     def __init__(self) -> None:
         self.mp_hands = mp.solutions.hands
-        self.detector = self.mp_hands.Hands(
-            static_image_mode=False, max_num_hands=2,
-            min_detection_confidence=0.7, min_tracking_confidence=0.5
-        )
+        self.detector = self.mp_hands.Hands(static_image_mode=False, max_num_hands=2, min_detection_confidence=0.7, min_tracking_confidence=0.5)
         self.drawer = mp.solutions.drawing_utils
 
     def detect(self, frame: np.ndarray) -> List[Dict]:
-        """仅返回坐标"""
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         results = self.detector.process(rgb)
         hands = []
         if results.multi_hand_landmarks:
             for lm in results.multi_hand_landmarks:
                 h, w, _ = frame.shape
-                p = lm.landmark[8]  # 食指
+                p = lm.landmark[8]
                 pos = (int(p.x * w), int(p.y * h))
                 hands.append({"pos": pos})
-                self.drawer.draw_landmarks(frame, lm, self.mp_hands.HAND_CONNECTIONS)
-                cv2.circle(frame, pos, 10, (0, 255, 0), -1)
+                self.drawer.draw_landmarks(frame, lm, self.mp_hands.HAND_CONNECTIONS,
+                    self.drawer.DrawingSpec(color=(200,200,200), thickness=1, circle_radius=1),
+                    self.drawer.DrawingSpec(color=(230,230,230), thickness=1, circle_radius=1))
         return hands
 
 class SnakeGame:
@@ -134,44 +161,46 @@ class SnakeGame:
         self.height = height
 
         self.pad_x = int(self.width * PADDING_RATIO)
-        self.pad_bottom = int(self.height * PADDING_RATIO) * 2
-        self.pad_top = 0
+        self.pad_y = int(self.height * PADDING_RATIO)
+        self.play_area = (self.pad_x, HUD_HEIGHT + 20, self.width - self.pad_x, self.height - self.pad_y)
 
         self.segment_length = 18
         self.min_segments = 6
-        self.head_radius = 12
-        self.body_radius = 9
-        self.food_radius = 12
-        self.alpha = 0.35
-        self.max_step = 42
+        self.head_radius = 16
+        self.body_radius = 14
+        self.food_radius = 15
+        self.alpha = 0.3
+        self.max_step = 45
         self.follow_deadzone = 5
         self.move_interval = 0.02
 
-        self.mode = "single"
-        self.num_snakes = 1
-        self.snakes: List[List[PointF]] = []
-        self.scores: List[int] = []
-        self.game_overs: List[bool] = []
-        self.target_pos: List[PointI] = []
-        self.food: PointI = (0, 0)
-        self.last_move_times: List[float] = []
-        self.result_text: str = ""
-        self.sub_text: str = ""
+        self.font_title = get_safe_font(65)
+        self.font_lg = get_safe_font(40)
+        self.font_md = get_safe_font(28)
+        self.font_sm = get_safe_font(18)
 
+        self.mode = "single"
+        self.difficulty = "easy"
+        self.num_snakes = 1
+        self.snakes = []
+        self.scores = []
+        self.game_overs = []
+        self.target_pos = []
+
+        self.foods: List[FoodItem] = []
+        self.particles: List[Particle] = []
+
+        self.last_move_times = []
+        self.result_text = ""
+        self.sub_text = ""
         self.current_level_idx = 0
         self.level_start_time = 0.0
         self.end_time = 0.0
-
         self.total_paused_time = 0.0
         self.pause_start_time = 0.0
         self.is_paused_now = False
-
         self.dual_winner = -1
-
-        # 字体资源（仅用于 UI，逻辑不依赖）
-        self.font_lg = get_safe_font(60)
-        self.font_md = get_safe_font(32)
-        self.font_sm = get_safe_font(20)
+        self.hit_wall_flash = 0
 
         self.tracker = HandTracker()
         self.hand_slots = [None, None]
@@ -188,25 +217,24 @@ class SnakeGame:
 
         self._init_state()
 
-    def _draw_ui_overlay(self, frame: np.ndarray, draw_func) -> np.ndarray:
-        """通用：将 OpenCV 帧交给 PIL 绘制 UI 覆盖层。"""
-        img_pil = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-        img_pil = img_pil.convert("RGBA")
-        draw = ImageDraw.Draw(img_pil)
-        draw_func(draw)
-        return cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGBA2BGR)
-
-    def play_bounds(self):
-        return self.pad_x, self.width - self.pad_x - 1, self.pad_top, self.height - self.pad_bottom - 1
-
     def clamp(self, v, lo, hi): return max(lo, min(hi, v))
     def dist2(self, p1, p2): return (p1[0]-p2[0])**2 + (p1[1]-p2[1])**2
-
     def clamp_to_play(self, x, y):
-        xm, xM, ym, yM = self.play_bounds()
-        # 允许手稍微出界，以便能把蛇头带到墙边
-        margin = 50
-        return self.clamp(x, xm - margin, xM + margin), self.clamp(y, ym - margin, yM + margin)
+        xm, ym, xM, yM = self.play_area
+        return self.clamp(x, xm, xM), self.clamp(y, ym, yM)
+
+    def get_elapsed_time(self) -> int:
+        if any(self.game_overs) and self.end_time > 0:
+            raw = self.end_time - self.level_start_time
+        elif self.is_paused_now:
+            raw = self.pause_start_time - self.level_start_time
+        else:
+            raw = time.time() - self.level_start_time
+        return int(max(0, raw - self.total_paused_time))
+
+    def _slot_active(self, i, ts):
+        s = self.hand_slots[i]
+        return s and (ts - s["ts"] < HAND_LOSS_GRACE)
 
     def _init_state(self) -> None:
         self.current_level_idx = 0
@@ -214,10 +242,9 @@ class SnakeGame:
         self._init_level()
 
     def _init_level(self) -> None:
-        xm, xM, ym, yM = self.play_bounds()
+        xm, ym, xM, yM = self.play_area
         cx, cy = (xm + xM) // 2, (ym + yM) // 2
-        span_x = xM - xm
-        offsets = [0] if self.num_snakes == 1 else [-span_x // 4, span_x // 4]
+        offsets = [0] if self.num_snakes == 1 else [-(xM-xm)//4, (xM-xm)//4]
 
         self.snakes = []
         for i in range(self.num_snakes):
@@ -229,110 +256,309 @@ class SnakeGame:
         self.game_overs = [False] * self.num_snakes
         self.target_pos = [(cx, cy) for _ in range(self.num_snakes)]
         self.last_move_times = [0.0] * self.num_snakes
-        self.food = self.generate_food()
+
+        self.foods = []
+        self._spawn_foods(initial=True)
+        self.particles = []
+        self.hit_wall_flash = 0
+
         self.result_text = ""
         self.sub_text = ""
         self.level_start_time = time.time()
         self.end_time = 0.0
-
         self.total_paused_time = 0.0
         self.pause_start_time = 0.0
         self.is_paused_now = False
-
         self.hand_slots = [None, None]
         self.manual_paused = False
         self.auto_paused = False
         if self.mode == "dual":
             self.binding_complete = False
 
+    def _spawn_foods(self, initial=False):
+        target_count = 3 if self.mode == "single" else 2
+        xm, ym, xM, yM = self.play_area
+        margin = 30
+
+        while len(self.foods) < target_count:
+            r = random.random()
+            if r < 0.5: ftype = 'insect'
+            elif r < 0.8: ftype = 'fish'
+            elif r < 0.95: ftype = 'mouse'
+            else: ftype = 'poison'
+
+            x = random.randint(xm + margin, xM - margin)
+            y = random.randint(ym + margin, yM - margin)
+
+            collision = False
+            for snake in self.snakes:
+                if self.dist2((x,y), snake[0]) < 5000: collision = True
+
+            if not collision:
+                self.foods.append(FoodItem((x,y), ftype, time.time()))
+
+    def _spawn_particles(self, x, y, color):
+        for _ in range(10):
+            self.particles.append(Particle(x, y, color))
+
+    def draw_cartoon_head(self, draw, pos, radius, color, direction_vec):
+        x, y = pos
+        dx, dy = direction_vec
+        angle = math.atan2(dy, dx)
+        draw.ellipse((x-radius, y-radius, x+radius, y+radius), fill=color, outline=COL_SNAKE_BORDER, width=2)
+
+        eye_offset_x = math.cos(angle - 0.6) * (radius * 0.5)
+        eye_offset_y = math.sin(angle - 0.6) * (radius * 0.5)
+        eye2_offset_x = math.cos(angle + 0.6) * (radius * 0.5)
+        eye2_offset_y = math.sin(angle + 0.6) * (radius * 0.5)
+
+        eye_r = 4.5
+        draw.ellipse((x+eye_offset_x-eye_r, y+eye_offset_y-eye_r, x+eye_offset_x+eye_r, y+eye_offset_y+eye_r), fill="white")
+        draw.ellipse((x+eye2_offset_x-eye_r, y+eye2_offset_y-eye_r, x+eye2_offset_x+eye_r, y+eye2_offset_y+eye_r), fill="white")
+        p_r = 2
+        draw.ellipse((x+eye_offset_x-p_r, y+eye_offset_y-p_r, x+eye_offset_x+p_r, y+eye_offset_y+p_r), fill="black")
+        draw.ellipse((x+eye2_offset_x-p_r, y+eye2_offset_y-p_r, x+eye2_offset_x+p_r, y+eye2_offset_y+p_r), fill="black")
+
+    def draw_food_icon(self, draw, pos, ftype, radius=None):
+        x, y = pos
+        r = radius if radius else self.food_radius
+        cfg = FOOD_TYPES[ftype]
+        color = cfg['color']
+
+        draw.ellipse((x-r, y-r, x+r, y+r), fill=color, outline="white", width=2)
+
+        if ftype == 'insect':
+            draw.ellipse((x-r*0.4, y-r*0.4, x+r*0.4, y+r*0.4), fill="red")
+            draw.line((x-r*0.4, y, x+r*0.4, y), fill="black", width=1)
+            draw.line((x, y-r*0.4, x, y+r*0.4), fill="black", width=1)
+        elif ftype == 'fish':
+            draw.ellipse((x-r*0.5, y-r*0.3, x+r*0.3, y+r*0.3), fill="blue")
+            draw.polygon([(x+r*0.2, y), (x+r*0.6, y-r*0.3), (x+r*0.6, y+r*0.3)], fill="blue")
+        elif ftype == 'mouse':
+            draw.ellipse((x-r*0.5, y-r*0.5, x, y), fill="grey")
+            draw.ellipse((x, y-r*0.5, x+r*0.5, y), fill="grey")
+            draw.ellipse((x-r*0.4, y-r*0.2, x+r*0.4, y+r*0.4), fill="lightgrey")
+        elif ftype == 'poison':
+            draw.rectangle((x-r*0.3, y-r*0.2, x+r*0.3, y+r*0.4), fill="purple")
+            draw.line((x-r*0.2, y, x+r*0.2, y+r*0.3), fill="white", width=1)
+            draw.line((x-r*0.2, y+r*0.3, x+r*0.2, y), fill="white", width=1)
+
+    def draw_ui_layer(self, frame):
+        img_pil = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        draw = ImageDraw.Draw(img_pil, 'RGBA')
+
+        # 1. 顶部 HUD
+        draw.rectangle((0, 0, self.width, HUD_HEIGHT), fill=COL_HUD_BG)
+        draw.line((0, HUD_HEIGHT, self.width, HUD_HEIGHT), fill=(255, 255, 255), width=3)
+
+        # 2. 时间进度条
+        elapsed = self.get_elapsed_time()
+        if self.mode == "single":
+            cfg = SINGLE_LEVELS[self.current_level_idx]
+            total_time = cfg["time"]
+            current_level_text = f"LEVEL {self.current_level_idx + 1}"
+            target_score = cfg["score"]
+            current_score = self.scores[0]
+        else:
+            total_time = DUAL_GAME_DURATION
+            current_level_text = "BATTLE MODE"
+
+        rem_time = max(0, total_time - elapsed)
+        progress = rem_time / total_time
+
+        bar_color = COL_PROGRESS_OK
+        if rem_time <= 3:
+            if int(time.time() * 5) % 2 == 0:
+                bar_color = COL_PROGRESS_LOW
+            else:
+                bar_color = (255, 255, 255)
+
+        bar_x, bar_y, bar_w, bar_h = 20, 10, self.width - 40, 15
+        draw.rounded_rectangle((bar_x, bar_y, bar_x+bar_w, bar_y+bar_h), radius=5, fill=(220, 220, 220))
+        draw.rounded_rectangle((bar_x, bar_y, bar_x+int(bar_w*progress), bar_y+bar_h), radius=5, fill=bar_color)
+
+        time_str = f"{int(rem_time)}s"
+        tb_time = draw.textbbox((0,0), time_str, font=self.font_md)
+        draw.text(((self.width - (tb_time[2]-tb_time[0]))//2, bar_y + 25), time_str, font=self.font_md, fill=(100, 100, 100))
+
+        # 3. HUD 信息
+        draw.text((30, 50), current_level_text, font=self.font_md, fill=(100, 100, 100))
+        if self.mode == "single":
+            draw.text((30, 80), f"SCORE: {current_score}/{target_score}", font=self.font_md, fill=(50, 150, 250))
+        else:
+            draw.text((30, 80), f"P1: {self.scores[0]}  P2: {self.scores[1]}", font=self.font_md, fill=(50, 150, 250))
+
+        # 4. 图例
+        legend_start_x = self.width - 450
+        legends = [('insect', '1'), ('fish', '2'), ('mouse', '3'), ('poison', 'Die')]
+
+        for i, (ftype, val) in enumerate(legends):
+            lx = legend_start_x + i * 90
+            ly = 65
+            self.draw_food_icon(draw, (lx, ly), ftype, radius=12)
+            draw.text((lx + 20, ly - 10), val, font=self.font_sm, fill=(150,150,150))
+
+        # 5. 蛇
+        for idx, snake in enumerate(self.snakes):
+            if not snake: continue
+
+            for i in range(len(snake)-1, 0, -1):
+                curr = snake[i]
+                if i >= len(snake) - 3:
+                    scale = (len(snake) - i) / 3.0
+                    r = max(4, int(self.body_radius * scale))
+                else:
+                    r = self.body_radius
+
+                x, y = int(curr[0]), int(curr[1])
+                draw.ellipse((x-r, y-r, x+r, y+r), fill=COL_SNAKE_BODY, outline=COL_SNAKE_BORDER)
+
+            hx, hy = snake[0]
+            if len(snake) > 1:
+                nx, ny = snake[1]
+                direction = (hx - nx, hy - ny)
+            else:
+                direction = (0, -1)
+
+            head_color = (255, 182, 193) if idx == 0 else (255, 255, 224)
+            self.draw_cartoon_head(draw, (int(hx), int(hy)), self.head_radius, head_color, direction)
+
+            if self.mode == "dual":
+                head_pt = (int(hx), int(hy))
+                outline_col = (100, 255, 100) if self._slot_active(idx, time.time()) else (200, 200, 200)
+                draw.ellipse((head_pt[0]-BIND_DIST, head_pt[1]-BIND_DIST, head_pt[0]+BIND_DIST, head_pt[1]+BIND_DIST), outline=outline_col, width=2)
+
+        # 6. 食物 (带闪烁逻辑)
+        curr_t = time.time()
+        for f in self.foods:
+            should_draw = True
+            if self.mode == "single" and self.difficulty == "hard" and not self.is_paused_now:
+                age = curr_t - f.spawn_time
+                time_left = HARD_MODE_FOOD_TIME - age
+                if time_left <= 2.0:
+                    if int(curr_t * 15) % 2 == 0:
+                        should_draw = False
+
+            if should_draw:
+                self.draw_food_icon(draw, (int(f.pos[0]), int(f.pos[1])), f.type)
+
+        # 7. 粒子
+        for p in self.particles:
+            draw.rectangle((p.x-3, p.y-3, p.x+3, p.y+3), fill=p.color + (int(255*p.life),))
+
+        # 8. 撞墙红闪
+        if self.hit_wall_flash > 0:
+            draw.rectangle((0, 0, self.width, self.height), outline=(255, 0, 0, 100), width=20)
+            self.hit_wall_flash -= 1
+
+        # 9. 结果弹窗
+        if any(self.game_overs) and self.result_text:
+            cx, cy = self.width//2, self.height//2
+            draw.rounded_rectangle((cx-200, cy-100, cx+200, cy+100), radius=20, fill=(255, 255, 255, 230), outline=(100,100,100), width=2)
+            draw.text((cx-180, cy-60), "GAME OVER", font=self.font_lg, fill=(255, 100, 100))
+            draw.text((cx-150, cy+10), self.result_text, font=self.font_md, fill=(50, 50, 50))
+            draw.text((cx-120, cy+50), "Press R:Restart  Q:Quit", font=self.font_sm, fill=(150, 150, 150))
+
+        elif self.sub_text:
+            cx, cy = self.width//2, self.height//2
+            draw.text((cx-100, cy), self.sub_text, font=self.font_lg, fill=(255, 215, 0), stroke_width=2, stroke_fill="black")
+            if time.time() - self.level_start_time > 2: self.sub_text = ""
+
+        # 暂停提示
+        if (self.auto_paused or self.manual_paused) and not any(self.game_overs):
+            cx, cy = self.width//2, self.height//2
+            draw.text((cx-100, cy+80), "PAUSED", font=self.font_lg, fill=(100, 100, 255))
+
+        return cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGBA2BGR)
+
+    # --- 游戏循环与逻辑 ---
     def select_mode(self) -> bool:
-        """模式选择界面：使用 Pillow 美化菜单 UI。"""
         win = "Mode Select"
+        menu_state = 'main'
 
         while True:
-            bg = np.zeros((360, 640, 3), np.uint8)
+            bg = Image.new('RGB', (640, 360), color=COL_BG_BLUE)
+            draw = ImageDraw.Draw(bg)
+            w, h = 640, 360
 
-            def draw_menu(draw: ImageDraw.ImageDraw) -> None:
-                w, h = 640, 360
-
-                # 标题
-                title = "AI Snake Game"
-                tb = draw.textbbox((0, 0), title, font=self.font_md)
+            if menu_state == 'main':
+                title = "SNAKE FUSION"
+                tb = draw.textbbox((0, 0), title, font=self.font_title)
                 tw = tb[2] - tb[0]
-                draw.text(((w - tw) // 2, 30), title, font=self.font_md, fill=(255, 255, 255))
+                draw.text(((w - tw) // 2, 20), title, font=self.font_title, fill=(255, 105, 180))
 
-                # 单人模式
-                single_title = "1: Single Player (Stage Mode)"
-                single_desc1 = "- Clear levels by reaching target score"
-                single_desc2 = "- Safe Wall: hitting walls won't kill you"
+                draw.rounded_rectangle((50, 100, 590, 180), radius=15, fill=(255, 240, 245), outline=(255, 182, 193), width=3)
+                draw.text((70, 110), "1. Adventure (Single)", font=self.font_lg, fill=(100, 100, 100))
+                draw.text((70, 155), "Safe wall, Clear levels", font=self.font_sm, fill=(150, 150, 150))
 
-                y0 = 90
-                box_w = w - 80
-                box = (40, y0 - 10, 40 + box_w, y0 + 80)
-                draw.rounded_rectangle(box, radius=12, fill=(20, 40, 20, 220), outline=(0, 200, 0), width=2)
+                draw.rounded_rectangle((50, 200, 590, 280), radius=15, fill=(240, 248, 255), outline=(135, 206, 250), width=3)
+                draw.text((70, 210), "2. Battle (Dual)", font=self.font_lg, fill=(100, 100, 100))
+                draw.text((70, 255), "Hit wall dies, Eat opponent", font=self.font_sm, fill=(150, 150, 150))
 
-                draw.text((60, y0), single_title, font=self.font_sm, fill=(180, 255, 180))
-                draw.text((70, y0 + 25), single_desc1, font=self.font_sm, fill=(220, 220, 220))
-                draw.text((70, y0 + 45), single_desc2, font=self.font_sm, fill=(220, 220, 220))
+                quit_text = "Q: Quit Game"
+                tb_q = draw.textbbox((0, 0), quit_text, font=self.font_sm)
+                tw_q = tb_q[2] - tb_q[0]
+                draw.text(((w - tw_q)//2, 320), quit_text, font=self.font_sm, fill=(200, 100, 100))
 
-                # 双人模式
-                dual_title = "2: Dual Player (Battle)"
-                dual_desc1 = "- Hit wall = immediate lose"
-                dual_desc2 = "- Head hits body -> steal tail"
+            elif menu_state == 'difficulty':
+                draw.text((180, 30), "Select Difficulty", font=self.font_lg, fill=(100, 100, 100))
 
-                y1 = 190
-                box2 = (40, y1 - 10, 40 + box_w, y1 + 80)
-                draw.rounded_rectangle(box2, radius=12, fill=(20, 35, 40, 220), outline=(0, 200, 200), width=2)
+                draw.rounded_rectangle((100, 90, 540, 160), radius=15, fill=(224, 255, 255), outline=(0, 200, 200), width=3)
+                draw.text((120, 100), "1. Easy Mode", font=self.font_lg, fill=(0, 150, 150))
+                draw.text((120, 140), "Food stays forever", font=self.font_sm, fill=(100, 150, 150))
 
-                draw.text((60, y1), dual_title, font=self.font_sm, fill=(180, 255, 255))
-                draw.text((70, y1 + 25), dual_desc1, font=self.font_sm, fill=(220, 220, 220))
-                draw.text((70, y1 + 45), dual_desc2, font=self.font_sm, fill=(220, 220, 220))
+                draw.rounded_rectangle((100, 180, 540, 250), radius=15, fill=(255, 228, 225), outline=(255, 100, 100), width=3)
+                draw.text((120, 190), "2. Hard Mode", font=self.font_lg, fill=(200, 50, 50))
+                draw.text((120, 230), "Food vanishes in 3s!", font=self.font_sm, fill=(200, 100, 100))
 
-                # 退出提示
-                footer = "Q / Esc: Quit"
-                draw_text_pill(draw, (40, 310), footer, self.font_sm, text_color=(255, 120, 120))
+                draw.text((280, 310), "B: Back", font=self.font_sm, fill=(150, 150, 150))
 
-            frame_show = self._draw_ui_overlay(bg, draw_menu)
-            cv2.imshow(win, frame_show)
+            frame = cv2.cvtColor(np.array(bg), cv2.COLOR_RGB2BGR)
+            cv2.imshow(win, frame)
+
             key = cv2.waitKey(20) & 0xFF
-            if key == ord("1"):
-                self.mode = "single"
-                self.num_snakes = 1
-                self.binding_complete = True
-                cv2.destroyWindow(win)
-                return True
-            if key == ord("2"):
-                self.mode = "dual"
-                self.num_snakes = 2
-                self.binding_complete = False
-                cv2.destroyWindow(win)
-                return True
-            if key in (ord("q"), ord("Q"), 27):
-                cv2.destroyWindow(win)
-                return False
+
+            if menu_state == 'main':
+                if key == ord('1'): menu_state = 'difficulty'
+                elif key == ord('2'):
+                    self.mode = "dual"
+                    self.num_snakes = 2
+                    self.binding_complete = False
+                    cv2.destroyWindow(win)
+                    return True
+                elif key in (ord('q'), 27): return False
+
+            elif menu_state == 'difficulty':
+                if key == ord('1'):
+                    self.mode = "single"; self.difficulty = "easy"; self.num_snakes = 1; self.binding_complete = True
+                    cv2.destroyWindow(win)
+                    return True
+                elif key == ord('2'):
+                    self.mode = "single"; self.difficulty = "hard"; self.num_snakes = 1; self.binding_complete = True
+                    cv2.destroyWindow(win)
+                    return True
+                elif key in (ord('b'), 27): menu_state = 'main'
 
     def bind_players(self, win: str) -> bool:
         self.hand_slots = [None, None]
         start_t = 0
         counting = False
+
         while True:
             ret, frame = self.cap.read()
             if not ret: return False
             frame = cv2.flip(frame, 1)
             hands = self.tracker.detect(frame)
 
-            self._draw_snakes_simple(frame)
             heads = [s[0] for s in self.snakes]
             self._assign_hands(hands, heads, time.time())
 
             both_active = self._slot_active(0, time.time()) and self._slot_active(1, time.time())
 
             if both_active:
-                if not counting:
-                    counting = True
-                    start_t = time.time()
+                if not counting: counting = True; start_t = time.time()
                 rem = 3 - (time.time() - start_t)
-                msg_main = f"Starting in {int(rem)+1}..."
+                msg = f"Starting in {int(rem)+1}..."
                 if rem <= 0:
                     self.binding_complete = True
                     self.level_start_time = time.time()
@@ -340,30 +566,24 @@ class SnakeGame:
                     return True
             else:
                 counting = False
-                msg_main = "Move fingers onto each snake head"
+                msg = "Place fingers on snake heads"
 
-            # 使用 Pillow 绘制绑定提示 UI 覆盖层
-            def draw_binding_ui(draw: ImageDraw.ImageDraw) -> None:
-                w, h = frame.shape[1], frame.shape[0]
+            img_pil = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+            draw = ImageDraw.Draw(img_pil, 'RGBA')
 
-                # 顶部半透明标题栏
-                draw.rectangle((0, 0, w, 80), fill=(0, 0, 0, 150))
-                title = "Dual Mode Binding"
-                tb = draw.textbbox((0, 0), title, font=self.font_md)
-                tw = tb[2] - tb[0]
-                draw.text(((w - tw) // 2, 20), title, font=self.font_md, fill=(255, 255, 255))
+            for i, snake in enumerate(self.snakes):
+                hx, hy = int(snake[0][0]), int(snake[0][1])
+                col = (100, 255, 100) if self._slot_active(i, time.time()) else (200, 200, 200)
+                draw.ellipse((hx-BIND_DIST, hy-BIND_DIST, hx+BIND_DIST, hy+BIND_DIST), outline=col, width=3)
+                draw.ellipse((hx-10, hy-10, hx+10, hy+10), fill=col)
 
-                # 主提示信息
-                color = (120, 255, 120) if both_active else (255, 220, 120)
-                draw_text_pill(draw, (40, 90), msg_main, self.font_md, text_color=color)
+            draw.rectangle((0, 0, self.width, 80), fill=(0, 0, 0, 150))
+            draw.text((50, 20), "Dual Mode Binding", font=self.font_md, fill="white")
+            draw.text((50, 50), msg, font=self.font_sm, fill="yellow")
 
-                # 底部操作说明
-                hint = "Place fingers on two heads | R: Rebind  Q/Esc: Quit"
-                draw_text_pill(draw, (40, h - 70), hint, self.font_sm, text_color=(200, 200, 200))
-
-            frame = self._draw_ui_overlay(frame, draw_binding_ui)
-
+            frame = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGBA2BGR)
             cv2.imshow(win, frame)
+
             k = cv2.waitKey(1)
             if k in (ord('q'), 27): return False
             if k == ord('r'): self.hand_slots = [None, None]; counting = False
@@ -371,392 +591,115 @@ class SnakeGame:
     def _assign_hands(self, hands, heads, ts):
         if self.mode == "single":
             if not hands: return
-            closest_hand = None
-            min_d2 = float('inf')
-            snake_head = heads[0]
+            closest, min_d = None, float('inf')
             for h in hands:
-                d2 = self.dist2(h["pos"], snake_head)
-                if d2 < min_d2:
-                    min_d2 = d2
-                    closest_hand = h["pos"]
-            if closest_hand:
-                self.hand_slots[0] = {"pos": closest_hand, "ts": ts}
+                d = self.dist2(h["pos"], heads[0])
+                if d < min_d: min_d = d; closest = h["pos"]
+            if closest: self.hand_slots[0] = {"pos": closest, "ts": ts}
         else:
             cands = []
             for h in hands:
-                pos = h["pos"]
                 for i, hd in enumerate(heads):
-                    d2 = self.dist2(pos, hd)
-                    if d2 < (BIND_DIST * 1.5)**2:
-                        cands.append((d2, i, pos))
+                    d = self.dist2(h["pos"], hd)
+                    if d < (BIND_DIST*1.5)**2: cands.append((d, i, h["pos"]))
             cands.sort(key=lambda x: x[0])
             used = set()
-            for d2, i, p in cands:
-                if i not in used:
-                    if d2 < BIND_DIST**2:
-                        self.hand_slots[i] = {"pos": p, "ts": ts}
-                        used.add(i)
-
-    def _slot_active(self, i, ts):
-        s = self.hand_slots[i]
-        return s and (ts - s["ts"] < HAND_LOSS_GRACE)
-
-    def get_elapsed_time(self) -> int:
-        if any(self.game_overs) and self.end_time > 0:
-            raw_duration = self.end_time - self.level_start_time
-            return int(max(0, raw_duration - self.total_paused_time))
-        if self.is_paused_now:
-            raw_duration = self.pause_start_time - self.level_start_time
-            return int(max(0, raw_duration - self.total_paused_time))
-        raw_duration = time.time() - self.level_start_time
-        return int(max(0, raw_duration - self.total_paused_time))
-
-    def generate_food(self):
-        margin = 50
-        xm, xM, ym, yM = self.play_bounds()
-        while True:
-            x = random.randint(xm + margin, xM - margin)
-            y = random.randint(ym + margin, yM - margin)
-            if not any(self.dist2((x,y), s[0]) < 2500 for s in self.snakes):
-                return (x, y)
-
-    def step_head(self, idx):
-        hx, hy = self.snakes[idx][0]
-        tx, ty = self.target_pos[idx]
-        dx, dy = tx - hx, ty - hy
-        d = (dx*dx + dy*dy)**0.5
-        if d < self.follow_deadzone: return (hx, hy)
-        step = min(self.max_step, d) * self.alpha
-        return (hx + dx/d*step, hy + dy/d*step)
-
-    def rebuild_body(self, idx, head):
-        pts = [head]
-        prev = head
-        for i, seg in enumerate(self.snakes[idx][1:]):
-            dx, dy = prev[0]-seg[0], prev[1]-seg[1]
-            d = (dx*dx+dy*dy)**0.5
-            if d < 1e-4: continue
-            nx = prev[0] - dx/d * self.segment_length
-            ny = prev[1] - dy/d * self.segment_length
-            pts.append((nx, ny))
-            prev = (nx, ny)
-        self.snakes[idx] = pts
+            for d, i, p in cands:
+                if i not in used and d < BIND_DIST**2:
+                    self.hand_slots[i] = {"pos": p, "ts": ts}
+                    used.add(i)
 
     def move_snake(self, idx):
         if self.game_overs[idx]: return
         if time.time() - self.last_move_times[idx] < self.move_interval: return
         self.last_move_times[idx] = time.time()
 
+        if self.mode == "single" and self.difficulty == "hard" and not self.is_paused_now:
+            now = time.time()
+            self.foods = [f for f in self.foods if (now - f.spawn_time) < HARD_MODE_FOOD_TIME]
+            self._spawn_foods()
+
         new_head = self.step_head(idx)
 
-        # --- 提前进行撞墙判定 ---
         x, y = new_head
-        xm, xM, ym, yM = self.play_bounds()
-        radius_buffer = self.head_radius
-
-        # 判断是否出界
-        hit_wall = (x - radius_buffer < xm) or (x + radius_buffer > xM) or \
-                   (y - radius_buffer < ym) or (y + radius_buffer > yM)
+        xm, ym, xM, yM = self.play_area
+        rad = self.head_radius
+        hit_wall = (x-rad < xm) or (x+rad > xM) or (y-rad < ym) or (y+rad > yM)
 
         if hit_wall:
             if self.mode == "single":
-                # 【修改点】单人模式：撞墙不死，强制将头限制在边界内（滑墙效果）
-                # 这样蛇就会贴着墙走，不会因为手移出去了而判定失败
-                nx = self.clamp(x, xm + radius_buffer, xM - radius_buffer)
-                ny = self.clamp(y, ym + radius_buffer, yM - radius_buffer)
-                new_head = (nx, ny)
+                new_head = (self.clamp(x, xm+rad, xM-rad), self.clamp(y, ym+rad, yM-rad))
             else:
-                # 双人模式：撞墙直接判负
                 self.game_overs[idx] = True
                 self.end_time = time.time()
                 self.dual_winner = 1 - idx
                 self.game_overs[1-idx] = True
-                self.result_text = "Green hit wall!" if idx == 0 else "Yellow hit wall!"
+                self.result_text = "HIT WALL!"
+                self.hit_wall_flash = 5
                 return
 
-        # 吃食物 (用可能修正过的 new_head)
-        if self.dist2(new_head, self.food) < (self.head_radius + self.food_radius)**2:
-            self.snakes[idx].append(self.snakes[idx][-1])
-            self.food = self.generate_food()
-            if self.mode == "single":
-                self.scores[idx] += 1
-                target = SINGLE_LEVELS[self.current_level_idx]["score"]
-                if self.scores[idx] >= target:
-                    self._next_level()
-                    return
+        ate_idx = -1
+        for i, f in enumerate(self.foods):
+            if self.dist2(new_head, f.pos) < (self.head_radius + self.food_radius)**2:
+                ate_idx = i
+                break
+
+        if ate_idx != -1:
+            food = self.foods.pop(ate_idx)
+            self._spawn_particles(food.pos[0], food.pos[1], FOOD_TYPES[food.type]['color'])
+
+            if food.type == 'poison':
+                self.game_overs[idx] = True
+                self.end_time = time.time()
+                self.result_text = "POISONED!"
+                self.hit_wall_flash = 5
+                return
+            else:
+                score = FOOD_TYPES[food.type]['score']
+                self.snakes[idx].append(self.snakes[idx][-1])
+                if self.mode == "single":
+                    self.scores[idx] += score
+                    target = SINGLE_LEVELS[self.current_level_idx]["score"]
+                    if self.scores[idx] >= target:
+                        self._next_level()
+                        return
+
+            self._spawn_foods()
 
         self.rebuild_body(idx, new_head)
 
-        # --- 双人互撞 ---
         if self.mode == "dual":
             other = 1 - idx
             for k, seg in enumerate(self.snakes[other]):
                 if self.dist2(new_head, seg) < (self.head_radius + self.body_radius)**2:
                     if k < 2:
-                        self.game_overs[0] = True
-                        self.game_overs[1] = True
-                        self.dual_winner = 2
-                        self.result_text = "Head to Head! Draw!"
+                        self.game_overs = [True, True]
                         self.end_time = time.time()
+                        self.result_text = "HEAD CRASH!"
                     else:
-                        stolen_part = self.snakes[other][k:]
+                        stolen = self.snakes[other][k:]
                         self.snakes[other] = self.snakes[other][:k]
-                        self.snakes[idx].extend(stolen_part)
+                        self.snakes[idx].extend(stolen)
 
                     if len(self.snakes[other]) < 3:
-                        self.game_overs[other] = True
-                        self.game_overs[idx] = True
-                        self.dual_winner = idx
-                        self.result_text = "Elimination!"
+                        self.game_overs = [True, True]
                         self.end_time = time.time()
+                        self.dual_winner = idx
+                        self.result_text = "ELIMINATED!"
                     return
 
-        if self.mode == "dual":
             self.scores[idx] = len(self.snakes[idx])
             if self.scores[idx] >= DUAL_TARGET_LENGTH:
                 self.dual_winner = idx
-                self.game_overs[0] = self.game_overs[1] = True
-                self.result_text = "Target Score Reached!"
+                self.game_overs = [True, True]
                 self.end_time = time.time()
-
-    def _next_level(self):
-        if self.current_level_idx < len(SINGLE_LEVELS) - 1:
-            self.current_level_idx += 1
-            self._init_level()
-            self.sub_text = f"Level {self.current_level_idx+1} Start!"
-        else:
-            self.game_overs[0] = True
-            self.result_text = "VICTORY! All Levels Cleared!"
-            self.end_time = time.time()
-
-    def check_time_limit(self):
-        if any(self.game_overs): return
-
-        elapsed = self.get_elapsed_time()
-
-        if self.mode == "single":
-            limit = SINGLE_LEVELS[self.current_level_idx]["time"]
-            if elapsed > limit:
-                self.game_overs[0] = True
-                self.result_text = "Time's Up! Level Failed."
-                self.end_time = time.time()
-        else:
-            limit = DUAL_GAME_DURATION
-            if elapsed > limit:
-                self.game_overs[0] = self.game_overs[1] = True
-                self.end_time = time.time()
-                if self.scores[0] > self.scores[1]:
-                    self.dual_winner = 0
-                    self.result_text = "Time Up! Green Wins!"
-                elif self.scores[1] > self.scores[0]:
-                    self.dual_winner = 1
-                    self.result_text = "Time Up! Yellow Wins!"
-                else:
-                    self.dual_winner = 2
-                    self.result_text = "Time Up! Draw!"
-
-    def draw(self, frame):
-        canvas = np.zeros_like(frame)
-        colors = [(0, 255, 0), (0, 200, 200)]
-
-        xm, xM, ym, yM = self.play_bounds()
-        cv2.rectangle(frame, (xm, ym), (xM, yM), (50, 50, 50), 2)
-
-        # 食物与蛇仍然用 OpenCV 绘制，保证性能与原有观感
-        cv2.circle(canvas, self.food, self.food_radius, (0, 0, 255), -1)
-
-        for idx, snake in enumerate(self.snakes):
-            if not snake:
-                continue
-            base = colors[idx]
-            if len(snake) > 1:
-                pts = np.array(snake, np.int32).reshape((-1, 1, 2))
-                cv2.polylines(canvas, [pts], False, base, 12, cv2.LINE_AA)
-            for i, p in enumerate(snake):
-                r = self.head_radius if i == 0 else max(
-                    6, int(self.body_radius * (0.9 - 0.4 * (i / len(snake))))
-                )
-                col = base if i == 0 else (base[0], int(base[1] * 0.8), base[2])
-                cv2.circle(canvas, (int(p[0]), int(p[1])), r, col, -1)
-
-            head_pt = (int(snake[0][0]), int(snake[0][1]))
-            cv2.circle(canvas, head_pt, self.head_radius, (255, 255, 255), 2)
-
-            if self.mode == "dual":
-                cv2.circle(frame, head_pt, BIND_DIST, (200, 200, 200), 1, cv2.LINE_AA)
-                if self._slot_active(idx, time.time()):
-                    cv2.circle(frame, head_pt, BIND_DIST, base, 2, cv2.LINE_AA)
-
-        cv2.addWeighted(canvas, 0.7, frame, 0.3, 0, frame)
-
-        elapsed = self.get_elapsed_time()
-
-        # 使用 Pillow 绘制 HUD 与提示面板
-        def draw_hud(draw: ImageDraw.ImageDraw) -> None:
-            if self.mode == "single":
-                cfg = SINGLE_LEVELS[self.current_level_idx]
-                rem_time = max(0, cfg["time"] - elapsed)
-                target = cfg["score"]
-                current = self.scores[0]
-
-                draw_text_pill(
-                    draw,
-                    (20, 20),
-                    f"Level {self.current_level_idx + 1}/10",
-                    self.font_md,
-                    text_color=(255, 255, 255),
-                )
-                draw_text_pill(
-                    draw,
-                    (20, 70),
-                    f"Goal: {target}  Current: {current}",
-                    self.font_md,
-                    text_color=(100, 255, 100),
-                )
-
-                time_col = (0, 255, 255) if rem_time > 10 else (255, 80, 80)
-                draw_text_pill(
-                    draw,
-                    (20, 120),
-                    f"Time: {rem_time}s",
-                    self.font_md,
-                    text_color=time_col,
-                )
-            else:
-                rem_time = max(0, DUAL_GAME_DURATION - elapsed)
-                draw_text_pill(
-                    draw,
-                    (20, 20),
-                    f"P1(Green): {self.scores[0]}",
-                    self.font_md,
-                    text_color=(100, 255, 100),
-                )
-                # 右上角玩家 2
-                p2_text = f"P2(Yellow): {self.scores[1]}"
-                bbox = draw.textbbox((0, 0), p2_text, font=self.font_md)
-                tw = bbox[2] - bbox[0]
-                draw_text_pill(
-                    draw,
-                    (self.width - tw - 40, 20),
-                    p2_text,
-                    self.font_md,
-                    text_color=(0, 255, 255),
-                )
-                draw_text_pill(
-                    draw,
-                    (20, 70),
-                    f"Win Length: {DUAL_TARGET_LENGTH}",
-                    self.font_sm,
-                    text_color=(220, 220, 220),
-                )
-                time_text = f"Time: {rem_time}s"
-                bbox = draw.textbbox((0, 0), time_text, font=self.font_md)
-                tw = bbox[2] - bbox[0]
-                draw_text_pill(
-                    draw,
-                    (self.width // 2 - tw // 2, 20),
-                    time_text,
-                    self.font_md,
-                    text_color=(255, 255, 255),
-                )
-
-            center_x = self.width // 2
-            center_y = self.height // 2
-
-            if any(self.game_overs) and self.result_text:
-                title = "RESULT"
-                hint = "Press R to Restart, Q to Quit"
-
-                # 外层面板
-                panel_w = 600
-                panel_h = 200
-                panel_box = (
-                    center_x - panel_w // 2,
-                    center_y - panel_h // 2,
-                    center_x + panel_w // 2,
-                    center_y + panel_h // 2,
-                )
-                draw.rounded_rectangle(
-                    panel_box,
-                    radius=20,
-                    fill=(0, 0, 0, 210),
-                    outline=(255, 255, 255),
-                    width=3,
-                )
-
-                # 标题
-                tb = draw.textbbox((0, 0), title, font=self.font_lg)
-                tw = tb[2] - tb[0]
-                th = tb[3] - tb[1]
-                draw.text(
-                    (center_x - tw // 2, center_y - panel_h // 2 + 15),
-                    title,
-                    font=self.font_lg,
-                    fill=(255, 215, 0),
-                )
-
-                # 结果文本
-                tb = draw.textbbox((0, 0), self.result_text, font=self.font_md)
-                tw = tb[2] - tb[0]
-                draw.text(
-                    (center_x - tw // 2, center_y - 10),
-                    self.result_text,
-                    font=self.font_md,
-                    fill=(255, 255, 255),
-                )
-
-                # 提示
-                tb = draw.textbbox((0, 0), hint, font=self.font_sm)
-                tw = tb[2] - tb[0]
-                draw.text(
-                    (center_x - tw // 2, center_y + panel_h // 2 - 40),
-                    hint,
-                    font=self.font_sm,
-                    fill=(200, 200, 200),
-                )
-            elif self.sub_text:
-                tb = draw.textbbox((0, 0), self.sub_text, font=self.font_md)
-                tw = tb[2] - tb[0]
-                draw_text_pill(
-                    draw,
-                    (center_x - tw // 2, center_y - 20),
-                    self.sub_text,
-                    self.font_md,
-                    text_color=(255, 255, 0),
-                )
-
-            if (self.auto_paused or self.manual_paused) and not any(self.game_overs):
-                text = "PAUSED (Hand Lost or Space)"
-                tb = draw.textbbox((0, 0), text, font=self.font_md)
-                tw = tb[2] - tb[0]
-                draw_text_pill(
-                    draw,
-                    (center_x - tw // 2, center_y - 60),
-                    text,
-                    self.font_md,
-                    text_color=(255, 80, 80),
-                )
-
-        # 保持原有 sub_text 的 2 秒自动消失逻辑
-        if self.sub_text and time.time() - self.level_start_time > 2:
-            self.sub_text = ""
-
-        frame[:] = self._draw_ui_overlay(frame, draw_hud)
-
-    def _draw_snakes_simple(self, frame):
-        colors = [(0, 255, 0), (0, 200, 200)]
-        for idx, s in enumerate(self.snakes):
-            for i, p in enumerate(s):
-                cv2.circle(frame, (int(p[0]), int(p[1])), 10, colors[idx], -1)
-            cv2.circle(frame, (int(s[0][0]), int(s[0][1])), BIND_DIST, (200,200,200), 1)
+                self.result_text = "WINNER!"
 
     def run(self):
         while True:
             if not self.select_mode(): break
             win = "Snake Game"
             cv2.namedWindow(win, cv2.WINDOW_NORMAL)
-            # 初始窗口大小设为游戏分辨率，后续如果用户全屏或拉伸，
-            # 我们会在显示时做等比例缩放并加黑边，避免出现灰条。
             cv2.resizeWindow(win, self.width, self.height)
             self._init_state()
 
@@ -782,18 +725,12 @@ class SnakeGame:
                 else:
                     if not all(active): self.auto_paused = True
 
-                is_currently_paused = self.auto_paused or self.manual_paused
+                is_paused = self.auto_paused or self.manual_paused
+                if is_paused and not self.is_paused_now: self.pause_start_time = time.time()
+                if not is_paused and self.is_paused_now: self.total_paused_time += (time.time() - self.pause_start_time)
+                self.is_paused_now = is_paused
 
-                if is_currently_paused and not self.is_paused_now:
-                    self.pause_start_time = time.time()
-
-                if not is_currently_paused and self.is_paused_now:
-                    duration = time.time() - self.pause_start_time
-                    self.total_paused_time += duration
-
-                self.is_paused_now = is_currently_paused
-
-                if not is_currently_paused and not any(self.game_overs):
+                if not is_paused and not any(self.game_overs):
                     self.check_time_limit()
                     for i in range(self.num_snakes):
                         if active[i]:
@@ -801,39 +738,67 @@ class SnakeGame:
                             self.target_pos[i] = self.clamp_to_play(int(p[0]/frame.shape[1]*self.width), int(p[1]/frame.shape[0]*self.height))
                             self.move_snake(i)
 
-                self.draw(frame)
+                    for p in self.particles: p.update()
+                    self.particles = [p for p in self.particles if not p.is_dead()]
 
-                # 等比例缩放并居中显示，窗口多余区域填充为黑色，避免右侧灰条
-                display = frame
-                try:
-                    _, _, win_w, win_h = cv2.getWindowImageRect(win)
-                    if win_w > 0 and win_h > 0 and (win_w != self.width or win_h != self.height):
-                        scale = min(win_w / self.width, win_h / self.height)
-                        new_w = max(1, int(self.width * scale))
-                        new_h = max(1, int(self.height * scale))
-                        resized = cv2.resize(frame, (new_w, new_h))
-                        display = np.zeros((win_h, win_w, 3), dtype=np.uint8)
-                        x0 = (win_w - new_w) // 2
-                        y0 = (win_h - new_h) // 2
-                        display[y0:y0 + new_h, x0:x0 + new_w] = resized
-                    else:
-                        display = frame
-                except Exception:
-                    display = frame
+                final_frame = self.draw_ui_layer(frame)
+                cv2.imshow(win, final_frame)
 
-                cv2.imshow(win, display)
                 k = cv2.waitKey(1) & 0xFF
-                if k in (ord('q'), ord('Q')):
+                if k in (ord('q'), 27):
                     cv2.destroyWindow(win)
                     break
-                if k in (ord('r'), ord('R')):
+                if k == ord('r'):
                     self._init_state()
-                    if self.mode == "dual":
-                        if not self.bind_players(win): break
+                    if self.mode == "dual" and not self.bind_players(win): break
                 if k == 32: self.manual_paused = not self.manual_paused
 
         self.cap.release()
         cv2.destroyAllWindows()
+
+    def check_time_limit(self):
+        if any(self.game_overs): return
+        elapsed = self.get_elapsed_time()
+        if self.mode == "single":
+            limit = SINGLE_LEVELS[self.current_level_idx]["time"]
+            if elapsed > limit:
+                self.game_overs[0] = True; self.end_time = time.time(); self.result_text = "TIME UP!"
+        else:
+            if elapsed > DUAL_GAME_DURATION:
+                self.game_overs = [True, True]; self.end_time = time.time()
+                if self.scores[0] > self.scores[1]: self.result_text = "P1 WINS"
+                elif self.scores[1] > self.scores[0]: self.result_text = "P2 WINS"
+                else: self.result_text = "DRAW"
+
+    def step_head(self, idx):
+        hx, hy = self.snakes[idx][0]
+        tx, ty = self.target_pos[idx]
+        dx, dy = tx - hx, ty - hy
+        d = (dx*dx + dy*dy)**0.5
+        if d < self.follow_deadzone: return (hx, hy)
+        step = min(self.max_step, d) * self.alpha
+        return (hx + dx/d*step, hy + dy/d*step)
+
+    def rebuild_body(self, idx, head):
+        pts = [head]
+        prev = head
+        for i, seg in enumerate(self.snakes[idx][1:]):
+            dx, dy = prev[0]-seg[0], prev[1]-seg[1]
+            d = (dx*dx+dy*dy)**0.5
+            if d < 1e-4: continue
+            nx = prev[0] - dx/d * self.segment_length
+            ny = prev[1] - dy/d * self.segment_length
+            pts.append((nx, ny))
+            prev = (nx, ny)
+        self.snakes[idx] = pts
+
+    def _next_level(self):
+        if self.current_level_idx < len(SINGLE_LEVELS) - 1:
+            self.current_level_idx += 1
+            self._init_level()
+            self.sub_text = f"LEVEL {self.current_level_idx+1}"
+        else:
+            self.game_overs[0] = True; self.end_time = time.time(); self.result_text = "ALL CLEAR!"
 
 if __name__ == "__main__":
     SnakeGame().run()
