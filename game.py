@@ -271,40 +271,82 @@ class SnakeGame:
             # 4. 绘制 UI
             # 背景
             bg_pil = Image.new('RGB', (self.width, self.height), color=COL_BG_BLUE)
-            draw = ImageDraw.Draw(bg_pil)
-            
-            # 绘制周围文字
+            draw = ImageDraw.Draw(bg_pil, 'RGBA')
+
+            accent = (255, 120, 150)
+            text_main = (70, 70, 70)
+            text_muted = (120, 120, 120)
+            card_fill = (255, 255, 255, 235)
+            card_shadow = (0, 0, 0, 35)
+
+            # 摄像头卡片阴影 + 背板
+            shadow_offset = 8
+            draw.rounded_rectangle((cam_x - shadow_offset, cam_y - shadow_offset,
+                                    cam_x + cam_w + shadow_offset, cam_y + cam_h + shadow_offset),
+                                   radius=18, fill=card_shadow)
+            draw.rounded_rectangle((cam_x - 6, cam_y - 6, cam_x + cam_w + 6, cam_y + cam_h + 6),
+                                   radius=16, fill=(235, 240, 240))
+
+            # 标题
             if menu_state == 'main':
                 title = "SNAKE FUSION"
-                tb = draw.textbbox((0, 0), title, font=self.font_title)
-                draw.text(((self.width - (tb[2]-tb[0]))//2, 50), title, font=self.font_title, fill=(255, 105, 180))
-                
-                # 左侧: 单人
-                draw.text((100, 300), "Single Player", font=self.font_lg, fill=(100, 100, 100))
-                draw.text((100, 350), "Pointing up", font=self.font_md, fill=(100, 100, 100))
-                
-                # 右侧: 双人
-                draw.text((self.width - 300, 300), "Dual Player", font=self.font_lg, fill=(100, 100, 100))
-                draw.text((self.width - 250, 350), "Victory", font=self.font_md, fill=(100, 100, 100))
-                
-                # 底部: Quit
-                draw.text(((self.width)//2 - 50, self.height - 100), "Quit: Fist", font=self.font_md, fill=(200, 100, 100))
+                title_color = accent
+            else:
+                title = "SELECT DIFFICULTY"
+                title_color = (100, 130, 255)
+            tb = draw.textbbox((0, 0), title, font=self.font_title)
+            draw.text(((self.width - (tb[2]-tb[0]))//2, 60), title, font=self.font_title, fill=title_color)
+
+            if menu_state == 'main':
+                # 左右卡片布局
+                card_w, card_h = 320, 200
+                left_x = 120
+                right_x = self.width - card_w - 120
+                card_y = cam_y - 40
+
+                def draw_card(x, y, title_text, hint_text):
+                    draw.rounded_rectangle((x, y, x + card_w, y + card_h), radius=18, fill=card_fill, outline=(230, 235, 235), width=2)
+                    title_tb = draw.textbbox((0, 0), title_text, font=self.font_lg)
+                    draw.text((x + 20, y + 40), title_text, font=self.font_lg, fill=text_main)
+                    draw.text((x + 20, y + 95), hint_text, font=self.font_md, fill=text_muted)
+
+                draw_card(left_x, card_y, "Single Player", "Pointing up")
+                draw_card(right_x, card_y, "Dual Player", "Victory")
+
+                # 底部退出提示 pill
+                pill_text = "Quit: Fist"
+                tb_q = draw.textbbox((0, 0), pill_text, font=self.font_md)
+                pill_w = tb_q[2] - tb_q[0] + 36
+                pill_h = tb_q[3] - tb_q[1] + 18
+                px = (self.width - pill_w) // 2
+                py = self.height - 110
+                draw.rounded_rectangle((px, py, px + pill_w, py + pill_h), radius=30, fill=(255, 235, 235, 220), outline=(255, 180, 180), width=2)
+                draw.text((px + 18, py + (pill_h - (tb_q[3]-tb_q[1]))//2), pill_text, font=self.font_md, fill=(200, 80, 80))
 
             elif menu_state == 'difficulty':
-                title = "SELECT DIFFICULTY"
-                tb = draw.textbbox((0, 0), title, font=self.font_title)
-                draw.text(((self.width - (tb[2]-tb[0]))//2, 50), title, font=self.font_title, fill=(100, 100, 255))
-                
-                # 左侧: Easy
-                draw.text((100, 300), "Easy Mode", font=self.font_lg, fill=(0, 150, 150))
-                draw.text((100, 350), "Pinky up", font=self.font_md, fill=(0, 150, 150))
-                
-                # 右侧: Hard
-                draw.text((self.width - 300, 300), "Hard Mode", font=self.font_lg, fill=(200, 50, 50))
-                draw.text((self.width - 250, 350), "Thumbs up", font=self.font_md, fill=(200, 50, 50))
-                
-                # 底部: Back
-                draw.text(((self.width)//2 - 100, self.height - 100), "Back: Fist", font=self.font_md, fill=(150, 150, 150))
+                card_w, card_h = 300, 180
+                left_x = 160
+                right_x = self.width - card_w - 160
+                card_y = cam_y - 20
+
+                draw.rounded_rectangle((left_x, card_y, left_x + card_w, card_y + card_h), radius=18, fill=card_fill, outline=(210, 235, 235), width=2)
+                draw.rounded_rectangle((right_x, card_y, right_x + card_w, card_y + card_h), radius=18, fill=card_fill, outline=(235, 210, 210), width=2)
+
+                draw.text((left_x + 20, card_y + 40), "Easy Mode", font=self.font_lg, fill=(0, 140, 140))
+                draw.text((left_x + 20, card_y + 95), "Pinky up", font=self.font_md, fill=(80, 150, 150))
+
+                draw.text((right_x + 20, card_y + 40), "Hard Mode", font=self.font_lg, fill=(200, 70, 70))
+                draw.text((right_x + 20, card_y + 95), "Thumbs up", font=self.font_md, fill=(200, 90, 90))
+
+                # Back pill
+                back_text = "Back: Fist"
+                tb_b = draw.textbbox((0, 0), back_text, font=self.font_md)
+                pill_w = tb_b[2] - tb_b[0] + 36
+                pill_h = tb_b[3] - tb_b[1] + 18
+                px = (self.width - pill_w) // 2
+                py = self.height - 110
+                draw.rounded_rectangle((px, py, px + pill_w, py + pill_h), radius=30, fill=(240, 240, 240, 220), outline=(200, 200, 200), width=2)
+                draw.text((px + 18, py + (pill_h - (tb_b[3]-tb_b[1]))//2), back_text, font=self.font_md, fill=text_muted)
 
             # 转换回 OpenCV
             final_img = cv_bg = cv2.cvtColor(np.array(bg_pil), cv2.COLOR_RGB2BGR)
@@ -323,13 +365,19 @@ class SnakeGame:
             
             # 进度提示
             if current_selection:
-                # 这里为了简单，直接写字在摄像头上方
                 status_text = f"Selecting: {current_selection.upper()} {3.0 - (time.time() - selection_start_time):.1f}s"
-                cv2.putText(final_img, status_text, (cam_x, cam_y - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.8, border_theme, 2)
-                
-                # 或者画个进度条在下面
-                bar_valid_w = int(cam_w * confirm_progress)
-                cv2.rectangle(final_img, (cam_x, cam_y + cam_h + 10), (cam_x + bar_valid_w, cam_y + cam_h + 20), border_theme, -1)
+                (tw, th), _ = cv2.getTextSize(status_text, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)
+                text_x = cam_x + (cam_w - tw) // 2
+                text_y = max(30, cam_y - 20)
+                cv2.putText(final_img, status_text, (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.8, border_theme, 2)
+
+                # 居中的进度条
+                bar_w = cam_w
+                bar_valid_w = int(bar_w * confirm_progress)
+                bar_x = cam_x
+                bar_y = cam_y + cam_h + 10
+                cv2.rectangle(final_img, (bar_x, bar_y), (bar_x + bar_w, bar_y + 10), (220, 220, 220), -1)
+                cv2.rectangle(final_img, (bar_x, bar_y), (bar_x + bar_valid_w, bar_y + 10), border_theme, -1)
             
             cv2.imshow(win, final_img)
             
