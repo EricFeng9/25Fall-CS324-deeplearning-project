@@ -334,7 +334,7 @@ def draw_menu_interface(bg_img, menu_state, current_selection, confirm_progress,
         contour_color = (230, 180, 140)
         sleeve_color = (100, 149, 237)
 
-        # 调整：手指更窄一点，更长一点，间距为0
+
         finger_w = 9
         finger_gap = 0  # 紧密贴合
         base_w = (finger_w * 4)
