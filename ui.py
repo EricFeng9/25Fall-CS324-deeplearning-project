@@ -284,9 +284,9 @@ def draw_game_overlay(game, frame):
 # ---主菜单绘制函数 ---
 def draw_menu_interface(bg_img, menu_state, current_selection, confirm_progress, cam_rect):
     """
-    绘制主菜单 (修复版)：
-    1. 包含完整的布局变量定义，解决 Unresolved reference 报错。
-    2. 包含拟物拳头、能量波纹、高光闪烁特效。
+    绘制主菜单 (手指修长紧凑版)：
+    1. 手势图标：手指加长，指缝紧密（0间距）。
+    2. 视觉优化：保持袖口和肌理感。
     """
     img_pil = Image.fromarray(cv2.cvtColor(bg_img, cv2.COLOR_BGR2RGB))
     draw = ImageDraw.Draw(img_pil, 'RGBA')
@@ -318,59 +318,136 @@ def draw_menu_interface(bg_img, menu_state, current_selection, confirm_progress,
     # === 3. 布局变量 ===
     right_area_start = cx + cw + 20
     right_center_x = right_area_start + (w - right_area_start) // 2 - 20
-    card_w, card_h = 280, 140 #卡片大小
+    card_w, card_h = 280, 140
 
     # ===================================================
 
-    # === 4. 内部辅助函数 (图标) ===
-    def _draw_menu_icon(draw, x, y, icon_type, color):
-        r = 30
-        draw.ellipse((x - r, y - r, x + r, y + r), fill=color)
+    # === 4. 内部辅助函数：绘制拟物手势图标 (修长版) ===
+    def _draw_hand_icon(draw, x, y, hand_type, bg_color):
+        # 1. 背景圆
+        r = 38  # 半径稍微加大一点以容纳长手指
+        draw.ellipse((x - r, y - r, x + r, y + r), fill=bg_color)
         draw.ellipse((x - r, y - r, x + r, y + r), outline="white", width=2)
-        if icon_type == 'single':
-            draw.ellipse((x - 10, y - 15, x + 10, y + 5), fill="white")
-            draw.ellipse((x - 4, y - 8, x - 1, y - 5), fill="black")
-            draw.ellipse((x + 1, y - 8, x + 4, y - 5), fill="black")
-        elif icon_type == 'dual':
-            draw.ellipse((x - 12, y - 8, x, y + 4), fill="white")
-            draw.ellipse((x, y - 8, x + 12, y + 4), fill="black")
-        elif icon_type == 'easy':
-            draw.arc((x - 10, y - 10, x + 10, y + 10), 0, 180, fill="white", width=3)
-            draw.ellipse((x - 8, y - 5, x - 4, y - 1), fill="white")
-            draw.ellipse((x + 4, y - 5, x + 8, y - 1), fill="white")
-        elif icon_type == 'hard':
-            draw.rectangle((x - 3, y - 15, x + 3, y + 5), fill="white")
-            draw.ellipse((x - 3, y + 8, x + 3, y + 14), fill="white")
 
-    # === 5. 内部辅助函数 (拟物拳头) ===
-    def _draw_emoji_fist(draw, x, y):
-        # 肤色
+        # 2. 手部参数
+        skin_color = (255, 220, 177)
+        contour_color = (230, 180, 140)
+        sleeve_color = (100, 149, 237)
+
+        # 调整：手指更窄一点，更长一点，间距为0
+        finger_w = 9
+        finger_gap = 0  # 紧密贴合
+        base_w = (finger_w * 4)
+
+        # 居中偏移
+        start_x = x - base_w // 2
+        start_y = y - 6  # 整体稍微上移一点
+
+        # --- 绘制逻辑 ---
+
+        # A. SINGLE (食指 ☝️)
+        if hand_type == 'single':
+            # 弯曲的三指 (中、无名、小)
+            for i in range(1, 4):
+                fx = start_x + i * finger_w
+                # 弯曲状态高度增加
+                draw.rounded_rectangle((fx, start_y + 8, fx + finger_w, start_y + 24), radius=3, fill=skin_color)
+                draw.rounded_rectangle((fx, start_y + 8, fx + finger_w, start_y + 24), radius=3, outline=contour_color,
+                                       width=1)
+            # 食指 (伸直 - 加长)
+            draw.rounded_rectangle((start_x, start_y - 18, start_x + finger_w, start_y + 24), radius=3, fill=skin_color)
+            draw.rounded_rectangle((start_x, start_y - 18, start_x + finger_w, start_y + 24), radius=3,
+                                   outline=contour_color, width=1)
+            # 拇指 (横跨)
+            draw.rounded_rectangle((start_x, start_y + 16, start_x + 20, start_y + 22), radius=3, fill=skin_color)
+
+        # B. DUAL (剪刀手 ✌️)
+        elif hand_type == 'dual':
+            # 弯曲的两指
+            for i in range(2, 4):
+                fx = start_x + i * finger_w
+                draw.rounded_rectangle((fx, start_y + 8, fx + finger_w, start_y + 24), radius=3, fill=skin_color)
+                draw.rounded_rectangle((fx, start_y + 8, fx + finger_w, start_y + 24), radius=3, outline=contour_color,
+                                       width=1)
+            # 食指 (伸直)
+            draw.rounded_rectangle((start_x, start_y - 18, start_x + finger_w, start_y + 24), radius=3, fill=skin_color)
+            draw.rounded_rectangle((start_x, start_y - 18, start_x + finger_w, start_y + 24), radius=3,
+                                   outline=contour_color, width=1)
+            # 中指 (伸直，稍微分开)
+            # 为了分开，手动调整x坐标
+            mx = start_x + finger_w + 2
+            draw.rounded_rectangle((mx, start_y - 18, mx + finger_w, start_y + 24), radius=3, fill=skin_color)
+            draw.rounded_rectangle((mx, start_y - 18, mx + finger_w, start_y + 24), radius=3, outline=contour_color,
+                                   width=1)
+            # 拇指
+            draw.rounded_rectangle((start_x, start_y + 16, start_x + 18, start_y + 22), radius=3, fill=skin_color)
+
+        # C. EASY (小指 🤙)
+        elif hand_type == 'easy':
+            # 中间三指弯曲
+            for i in range(0, 3):
+                fx = start_x + i * finger_w
+                draw.rounded_rectangle((fx, start_y + 8, fx + finger_w, start_y + 24), radius=3, fill=skin_color)
+                draw.rounded_rectangle((fx, start_y + 8, fx + finger_w, start_y + 24), radius=3, outline=contour_color,
+                                       width=1)
+            # 小指 (伸直)
+            px = start_x + 3 * finger_w
+            draw.rounded_rectangle((px, start_y - 10, px + finger_w, start_y + 24), radius=3, fill=skin_color)
+            draw.rounded_rectangle((px, start_y - 10, px + finger_w, start_y + 24), radius=3, outline=contour_color,
+                                   width=1)
+            # 拇指 (伸出)
+            draw.rounded_rectangle((start_x - 6, start_y + 12, start_x + 6, start_y + 20), radius=3, fill=skin_color)
+
+        # D. HARD (竖大拇指 👍)
+        elif hand_type == 'hard':
+            # 四指弯曲 (紧密)
+            for i in range(4):
+                fx = start_x + i * finger_w
+                fy = start_y + (0 if i in [1, 2] else 3) + 6
+                draw.rounded_rectangle((fx, fy, fx + finger_w, fy + 18), radius=3, fill=skin_color)
+                draw.rounded_rectangle((fx, fy, fx + finger_w, fy + 18), radius=3, outline=contour_color, width=1)
+            # 拇指 (竖直向上)
+            draw.rounded_rectangle((start_x - 5, start_y - 8, start_x + 3, start_y + 16), radius=3, fill=skin_color)
+            draw.rounded_rectangle((start_x - 5, start_y - 8, start_x + 3, start_y + 16), radius=3,
+                                   outline=contour_color, width=1)
+
+        # --- 统一袖口 ---
+        sleeve_y = start_y + 26
+        # 稍微比手宽一点点
+        draw.rectangle((start_x - 2, sleeve_y, start_x + base_w + 2, sleeve_y + 6), fill=sleeve_color)
+        draw.line((start_x - 2, sleeve_y, start_x + base_w + 2, sleeve_y), fill=(255, 255, 255), width=1)
+
+    # === 5. 内部辅助函数 (底部的拳头提示 - 同样修长紧密) ===
+    def _draw_bottom_fist(draw, x, y):
         skin_color = (255, 220, 177)
         contour_color = (230, 180, 140)
 
+        finger_w = 6
+        gap = 0  # 紧密
+
         # 四指
         for i in range(4):
-            fx = x + i * 5
-            fy_offset = 0 if i in [1, 2] else 2
-            draw.rounded_rectangle((fx, y + fy_offset, fx + 5, y + 16), radius=2, fill=skin_color)
-            if i > 0:
-                draw.line((fx, y + fy_offset + 2, fx, y + 14), fill=contour_color, width=1)
+            fx = x + i * finger_w
+            # 稍微拉长高度
+            draw.rounded_rectangle((fx, y, fx + finger_w, y + 22), radius=3, fill=skin_color)
+            # 加上轮廓线以区分手指
+            draw.rounded_rectangle((fx, y, fx + finger_w, y + 22), radius=3, outline=contour_color, width=1)
 
         # 拇指
-        draw.rounded_rectangle((x - 2, y + 10, x + 16, y + 18), radius=3, fill=skin_color)
-        draw.line((x - 2, y + 14, x + 14, y + 14), fill=contour_color, width=1)
+        draw.rounded_rectangle((x - 2, y + 14, x + 20, y + 24), radius=3, fill=skin_color)
+        draw.rounded_rectangle((x - 2, y + 14, x + 20, y + 24), radius=3, outline=contour_color, width=1)
 
         # 袖口
-        draw.rectangle((x, y + 18, x + 20, y + 24), fill=(100, 149, 237))
-        draw.line((x, y + 18, x + 20, y + 18), fill=(255, 255, 255), width=1)
+        draw.rectangle((x - 2, y + 24, x + 26, y + 30), fill=(100, 149, 237))
+        draw.line((x - 2, y + 24, x + 26, y + 24), fill=(255, 255, 255), width=1)
 
-    # === 6. 内部辅助函数：绘制卡片 (含能量波特效) ===
+    # === 6. 内部辅助函数：绘制卡片 ===
     def draw_card(y_pos, key, title, desc, icon_type, active_color):
         is_selected = (current_selection == key)
 
         cur_w, cur_h = card_w, card_h
 
-        # 1. 抖动计算 (蓄力感)
+        # 1. 抖动
         shake_x, shake_y = 0, 0
         if is_selected and confirm_progress < 1.0:
             if confirm_progress > 0.7:
@@ -381,7 +458,7 @@ def draw_menu_interface(bg_img, menu_state, current_selection, confirm_progress,
         x = right_center_x - cur_w // 2 + shake_x
         y = y_pos - (cur_h - card_h) // 2 + shake_y
 
-        # 2. 绘制 "能量波" (Ripple Effect)
+        # 2. 能量波
         if is_selected and confirm_progress > 0.9:
             ripple_scale = 1.0 + (confirm_progress - 0.9) * 4.0
             rw = int(cur_w * ripple_scale)
@@ -393,11 +470,10 @@ def draw_menu_interface(bg_img, menu_state, current_selection, confirm_progress,
             if alpha > 0:
                 draw.rounded_rectangle((rx, ry, rx + rw, ry + rh), radius=35, fill=active_color + (alpha,))
 
-        # 3. 卡片颜色逻辑 (含 Flash 高光)
+        # 3. 颜色
         if is_selected:
             base_color = active_color
             if confirm_progress > 0.9:
-                # 变白闪烁
                 blend = (confirm_progress - 0.9) * 10
                 r = int(base_color[0] + (255 - base_color[0]) * blend)
                 g = int(base_color[1] + (255 - base_color[1]) * blend)
@@ -414,7 +490,7 @@ def draw_menu_interface(bg_img, menu_state, current_selection, confirm_progress,
             text_col = (80, 80, 80)
             draw.rounded_rectangle((x + 5, y + 5, x + cur_w + 5, y + cur_h + 5), radius=25, fill=(0, 0, 0, 20))
 
-        # 4. 绘制卡片
+        # 4. 卡片本体
         draw.rounded_rectangle((x, y, x + cur_w, y + cur_h), radius=25, fill=fill_col)
 
         # 5. 进度条
@@ -428,21 +504,21 @@ def draw_menu_interface(bg_img, menu_state, current_selection, confirm_progress,
             remaining = max(0.0, 3.0 * (1.0 - confirm_progress))
             draw.text((x + cur_w - 60, y + 10), f"{remaining:.1f}", font=font_hint, fill="white")
 
-        # 6. 图标与文字
+        # 6. 绘制拟物图标
         icon_x = x + 60
         icon_y = y + cur_h // 2
-        icon_bg = (255, 255, 255, 100) if (is_selected and confirm_progress <= 0.9) else active_color
-        if is_selected and confirm_progress > 0.9: icon_bg = (255, 255, 255)
 
-        _draw_menu_icon(draw, icon_x, icon_y, icon_type, icon_bg)
+        bg_circle_color = (255, 255, 255, 150) if is_selected else active_color
+        if is_selected and confirm_progress > 0.9: bg_circle_color = (255, 255, 255)
 
-        #文字位置 y越大越下
+        _draw_hand_icon(draw, icon_x, icon_y, icon_type, bg_circle_color)
+
+        # 文字
         text_x = x + 113
         draw.text((text_x, y + 40), title, font=font_card_title, fill=text_col)
         draw.text((text_x, y + 85), desc, font=font_card_desc, fill=text_col)
 
     # === 7. 执行绘制 ===
-    #模式选择卡片的高度
     card1_y_pos = int(h * 0.28)
     card2_y_pos = int(h * 0.58)
 
@@ -460,8 +536,8 @@ def draw_menu_interface(bg_img, menu_state, current_selection, confirm_progress,
     text_w = tb[2] - tb[0]
     total_w = text_w + 35
     start_x = right_center_x - total_w // 2
-    draw.text((start_x-5, h - 78), hint_text, font=font_hint, fill=(150, 150, 150))
-    _draw_emoji_fist(draw, start_x + text_w + 5, h - 83)
+    draw.text((start_x - 5, h - 78), hint_text, font=font_hint, fill=(150, 150, 150))
+    _draw_bottom_fist(draw, start_x + text_w + 5, h - 83)
 
     # === 9. 退出反馈 ===
     if current_selection in ['quit_app', 'back_to_main']:
