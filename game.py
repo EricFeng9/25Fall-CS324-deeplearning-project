@@ -206,195 +206,119 @@ class SnakeGame:
     # --- 游戏循环与逻辑 ---
     def select_mode(self) -> bool:
         """
-        主菜单逻辑 (重构版):
-        - 界面：中央显示摄像头预览，四周显示选项文本。
-        - 交互：检测到特定手势后，框变绿 + 倒计时 3 秒确认。
+        主菜单逻辑
         """
         win = "Mode Select"
-        menu_state = 'main' # 'main', 'difficulty'
-        
-        # 计时器状态
+        menu_state = 'main'  # 'main' 或 'difficulty'
+
+        # 计时器状态初始化
         selection_start_time = 0.0
-        current_selection = None # 存储当前正在选中的目标 (e.g., 'single', 'dual', 'back'...)
-        
-        # UI 布局参数
-        cam_w, cam_h = 160, 160 # 缩小一倍显示
-        cam_x = (self.width - cam_w) // 2
-        cam_y = (self.height - cam_h) // 2
-        
+        current_selection = None  # 当前正在“注视”/选中的选项标识符
+
+        # 布局参数 关于摄像头比例长度和位置
+        cam_h = 465
+        cam_w = int(cam_h * ( 5 / 3))
+        cam_x = 60
+        cam_y = (self.height - cam_h) // 2 + 30
+
         while True:
+            # 1. 读取摄像头
             ret, frame = self.cap.read()
             if not ret: return False
             frame = cv2.flip(frame, 1)
+
+            # 2. 检测手势
             hands = self.tracker.detect(frame)
-            
-            # 1. 识别手势
             gesture = "UNKNOWN"
             if hands:
                 gesture = hands[0].get("gesture", "UNKNOWN")
-            
-            # 2. 映射手势到“意图”
+
+            # 3. 意图映射：给手势赋予含义 (定义 quit_app 的地方)
             intended_selection = None
-            if menu_state == 'main':
-                if gesture == "POINTING_UP": intended_selection = 'single' # 预选单人(进入难度选择)
-                elif gesture == "VICTORY": intended_selection = 'dual'
-                elif gesture == "FIST": intended_selection = 'quit'
-            elif menu_state == 'difficulty':
-                if gesture == "PINKY_UP": intended_selection = 'easy'
-                elif gesture == "THUMB_UP": intended_selection = 'hard'
-                elif gesture == "FIST": intended_selection = 'back'
-            
-            # 3. 倒计时逻辑
-            # 如果意图和当前选中一致，且不是None -> 继续计时
+
+            if gesture == "FIST":
+                if menu_state == 'main':
+                    intended_selection = 'quit_app'  # 这里定义了 quit_app
+                else:
+                    intended_selection = 'back_to_main'  # 这里定义了 back_to_main
+            else:
+                if menu_state == 'main':
+                    if gesture == "POINTING_UP":
+                        intended_selection = 'single'
+                    elif gesture == "VICTORY":
+                        intended_selection = 'dual'
+                elif menu_state == 'difficulty':
+                    if gesture == "PINKY_UP":
+                        intended_selection = 'easy'
+                    elif gesture == "THUMB_UP":
+                        intended_selection = 'hard'
+
+            # 4. 倒计时逻辑
             if intended_selection is not None:
                 if intended_selection == current_selection:
-                    # 持续保持
-                    pass
+                    pass  # 手势没变，继续保持
                 else:
-                    # 新意图
+                    # 手势变了，重置计时器
                     current_selection = intended_selection
                     selection_start_time = time.time()
             else:
-                # 意图丢失 -> 重置
                 current_selection = None
                 selection_start_time = 0.0
 
-            # 计算剩余时间
+            # 5. 计算进度
             confirm_progress = 0.0
             triggered = False
+
             if current_selection is not None:
                 elapsed = time.time() - selection_start_time
-                confirm_progress = min(1.0, elapsed / 3.0)
+                confirm_progress = min(1.0, elapsed / 3.0)  # 3秒倒计时
+
+                # 只有这里满足 3秒，triggered 才会变成 True
                 if elapsed >= 3.0:
                     triggered = True
-            
-            # 4. 绘制 UI
-            # 背景
-            bg_pil = Image.new('RGB', (self.width, self.height), color=COL_BG_BLUE)
-            draw = ImageDraw.Draw(bg_pil, 'RGBA')
 
-            accent = (255, 120, 150)
-            text_main = (70, 70, 70)
-            text_muted = (120, 120, 120)
-            card_fill = (255, 255, 255, 235)
-            card_shadow = (0, 0, 0, 35)
-
-            # 摄像头卡片阴影 + 背板
-            shadow_offset = 8
-            draw.rounded_rectangle((cam_x - shadow_offset, cam_y - shadow_offset,
-                                    cam_x + cam_w + shadow_offset, cam_y + cam_h + shadow_offset),
-                                   radius=18, fill=card_shadow)
-            draw.rounded_rectangle((cam_x - 6, cam_y - 6, cam_x + cam_w + 6, cam_y + cam_h + 6),
-                                   radius=16, fill=(235, 240, 240))
-
-            # 标题
-            if menu_state == 'main':
-                title = "SNAKE FUSION"
-                title_color = accent
-            else:
-                title = "SELECT DIFFICULTY"
-                title_color = (100, 130, 255)
-            tb = draw.textbbox((0, 0), title, font=self.font_title)
-            draw.text(((self.width - (tb[2]-tb[0]))//2, 60), title, font=self.font_title, fill=title_color)
-
-            if menu_state == 'main':
-                # 左右卡片布局
-                card_w, card_h = 320, 200
-                left_x = 120
-                right_x = self.width - card_w - 120
-                card_y = cam_y - 40
-
-                def draw_card(x, y, title_text, hint_text):
-                    draw.rounded_rectangle((x, y, x + card_w, y + card_h), radius=18, fill=card_fill, outline=(230, 235, 235), width=2)
-                    title_tb = draw.textbbox((0, 0), title_text, font=self.font_lg)
-                    draw.text((x + 20, y + 40), title_text, font=self.font_lg, fill=text_main)
-                    draw.text((x + 20, y + 95), hint_text, font=self.font_md, fill=text_muted)
-
-                draw_card(left_x, card_y, "Single Player", "Pointing up")
-                draw_card(right_x, card_y, "Dual Player", "Victory")
-
-                # 底部退出提示 pill
-                pill_text = "Quit: Fist"
-                tb_q = draw.textbbox((0, 0), pill_text, font=self.font_md)
-                pill_w = tb_q[2] - tb_q[0] + 36
-                pill_h = tb_q[3] - tb_q[1] + 18
-                px = (self.width - pill_w) // 2
-                py = self.height - 110
-                draw.rounded_rectangle((px, py, px + pill_w, py + pill_h), radius=30, fill=(255, 235, 235, 220), outline=(255, 180, 180), width=2)
-                draw.text((px + 18, py + (pill_h - (tb_q[3]-tb_q[1]))//2), pill_text, font=self.font_md, fill=(200, 80, 80))
-
-            elif menu_state == 'difficulty':
-                card_w, card_h = 300, 180
-                left_x = 160
-                right_x = self.width - card_w - 160
-                card_y = cam_y - 20
-
-                draw.rounded_rectangle((left_x, card_y, left_x + card_w, card_y + card_h), radius=18, fill=card_fill, outline=(210, 235, 235), width=2)
-                draw.rounded_rectangle((right_x, card_y, right_x + card_w, card_y + card_h), radius=18, fill=card_fill, outline=(235, 210, 210), width=2)
-
-                draw.text((left_x + 20, card_y + 40), "Easy Mode", font=self.font_lg, fill=(0, 140, 140))
-                draw.text((left_x + 20, card_y + 95), "Pinky up", font=self.font_md, fill=(80, 150, 150))
-
-                draw.text((right_x + 20, card_y + 40), "Hard Mode", font=self.font_lg, fill=(200, 70, 70))
-                draw.text((right_x + 20, card_y + 95), "Thumbs up", font=self.font_md, fill=(200, 90, 90))
-
-                # Back pill
-                back_text = "Back: Fist"
-                tb_b = draw.textbbox((0, 0), back_text, font=self.font_md)
-                pill_w = tb_b[2] - tb_b[0] + 36
-                pill_h = tb_b[3] - tb_b[1] + 18
-                px = (self.width - pill_w) // 2
-                py = self.height - 110
-                draw.rounded_rectangle((px, py, px + pill_w, py + pill_h), radius=30, fill=(240, 240, 240, 220), outline=(200, 200, 200), width=2)
-                draw.text((px + 18, py + (pill_h - (tb_b[3]-tb_b[1]))//2), back_text, font=self.font_md, fill=text_muted)
-
-            # 转换回 OpenCV
-            final_img = cv_bg = cv2.cvtColor(np.array(bg_pil), cv2.COLOR_RGB2BGR)
-            
-            # 贴入摄像头画面 (居中)
+            # 6. 绘制 UI
+            bg_color_bgr = (COL_BG_BLUE[2], COL_BG_BLUE[1], COL_BG_BLUE[0])
+            final_img = np.full((self.height, self.width, 3), bg_color_bgr, dtype=np.uint8)
             frame_resized = cv2.resize(frame, (cam_w, cam_h))
-            final_img[cam_y:cam_y+cam_h, cam_x:cam_x+cam_w] = frame_resized
-            
-            # 绘制边框和进度
-            border_theme = (200, 200, 200) # 默认灰
-            if current_selection:
-                border_theme = (0, 255, 0) # 选中时变绿
-            
-            # 边框
-            cv2.rectangle(final_img, (cam_x, cam_y), (cam_x+cam_w, cam_y+cam_h), border_theme, 4)
-            
-            # 进度提示
-            if current_selection:
-                status_text = f"Selecting: {current_selection.upper()} {3.0 - (time.time() - selection_start_time):.1f}s"
-                (tw, th), _ = cv2.getTextSize(status_text, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)
-                text_x = cam_x + (cam_w - tw) // 2
-                text_y = max(30, cam_y - 20)
-                cv2.putText(final_img, status_text, (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.8, border_theme, 2)
+            final_img[cam_y:cam_y + cam_h, cam_x:cam_x + cam_w] = frame_resized
 
-                # 居中的进度条
-                bar_w = cam_w
-                bar_valid_w = int(bar_w * confirm_progress)
-                bar_x = cam_x
-                bar_y = cam_y + cam_h + 10
-                cv2.rectangle(final_img, (bar_x, bar_y), (bar_x + bar_w, bar_y + 10), (220, 220, 220), -1)
-                cv2.rectangle(final_img, (bar_x, bar_y), (bar_x + bar_valid_w, bar_y + 10), border_theme, -1)
-            
+            # 调用 ui.py 绘制 (红色框和倒计时文字在这里画)
+            final_img = draw_menu_interface(
+                final_img,
+                menu_state,
+                current_selection,
+                confirm_progress,
+                (cam_x, cam_y, cam_w, cam_h)
+            )
             cv2.imshow(win, final_img)
-            
-            # 5. 触发确认
+
+            # 7. 处理触发逻辑
             if triggered:
-                if current_selection == 'single':
+
+                # 退出程序
+                if current_selection == 'quit_app':
+                    return False
+
+                    # 返回上级菜单
+                elif current_selection == 'back_to_main':
+                    menu_state = 'main'
+                    current_selection = None  # 重置防止连续触发
+
+                # 进入难度选择
+                elif current_selection == 'single':
                     menu_state = 'difficulty'
                     current_selection = None
-                    time.sleep(0.5) # 防止连续误触
+
+                # 进入双人模式
                 elif current_selection == 'dual':
                     self.mode = "dual"
                     self.num_snakes = 2
                     self.binding_complete = False
                     cv2.destroyWindow(win)
                     return True
-                elif current_selection == 'quit':
-                    return False
+
+                # 选择简单
                 elif current_selection == 'easy':
                     self.mode = "single"
                     self.difficulty = "easy"
@@ -402,6 +326,8 @@ class SnakeGame:
                     self.binding_complete = True
                     cv2.destroyWindow(win)
                     return True
+
+                # 选择困难
                 elif current_selection == 'hard':
                     self.mode = "single"
                     self.difficulty = "hard"
@@ -409,25 +335,11 @@ class SnakeGame:
                     self.binding_complete = True
                     cv2.destroyWindow(win)
                     return True
-                elif current_selection == 'back':
-                    menu_state = 'main'
-                    current_selection = None
-                    time.sleep(0.5)
-            
+
+            # 8. 键盘控制
             key = cv2.waitKey(1) & 0xFF
-            if key in (ord('q'), 27): return False
-            # 键盘后门保留
-            if key == ord('1'):
-                if menu_state == 'main': menu_state = 'difficulty'
-                else: 
-                    self.mode = "single"; self.difficulty = "easy"; self.num_snakes = 1; self.binding_complete = True
-                    cv2.destroyWindow(win); return True
-            if key == ord('2'):
-                if menu_state == 'main':
-                    self.mode = "dual"; self.num_snakes = 2; self.binding_complete = False; cv2.destroyWindow(win); return True
-                else:
-                    self.mode = "single"; self.difficulty = "hard"; self.num_snakes = 1; self.binding_complete = True
-                    cv2.destroyWindow(win); return True
+            if key in (ord('q'), 27):
+                return False
 
     def bind_players(self, win: str) -> bool:
         self.hand_slots = [None, None]
@@ -591,20 +503,29 @@ class SnakeGame:
                 self.result_text = "WINNER!"
 
     def run(self):
+        """
+        游戏主入口：包含最外层的应用循环和内层的游戏循环。
+        """
         while True:
-            if not self.select_mode(): break
+            # 1. 模式选择循环
+            # 如果 select_mode 返回 False，说明用户想要退出程序
+            if not self.select_mode():
+                break
+
+                # 初始化游戏窗口和状态
             win = "Snake Game"
             cv2.namedWindow(win, cv2.WINDOW_NORMAL)
             cv2.resizeWindow(win, self.width, self.height)
             self._init_state()
 
+            # 双人模式需要先进行绑定
             if self.mode == "dual":
                 if not self.bind_players(win):
                     cv2.destroyAllWindows()
-                    continue
+                    continue  # 如果绑定失败或退出，回到模式选择
 
-            # In-game quit timer
-            # self.quit_trigger_start = 0.0 # Done in init_state
+            # 2. 游戏内主循环
+            back_to_menu = False  # 标记：是否需要返回主菜单
 
             while True:
                 ret, frame = self.cap.read()
@@ -612,41 +533,50 @@ class SnakeGame:
                 frame = cv2.flip(frame, 1)
                 now = time.time()
 
+                # 手势检测
                 hands = self.tracker.detect(frame)
+
+                # 只有当手势有效时才更新蛇的控制
                 heads = [s[0] if s else (0, 0) for s in self.snakes]
                 self._assign_hands(hands, heads, now)
 
+                # 检查活跃状态 (是否丢手)
                 active = [self._slot_active(i, now) for i in range(self.num_snakes)]
-                
-                # In-Game Quit Logic: FIST
-                fist_detected = False
-                for h in hands:
-                    if h.get("gesture") == "FIST":
-                        fist_detected = True
-                        break
-                
-                if fist_detected:
-                    if self.quit_trigger_start == 0.0:
-                        self.quit_trigger_start = now
-                    
-                    elapsed_quit = now - self.quit_trigger_start
-                    if elapsed_quit >= 3.0:
-                        cv2.destroyWindow(win)
-                        break
-                else:
-                    self.quit_trigger_start = 0.0
-
                 self.auto_paused = False
                 if self.mode == "single":
                     if not active[0]: self.auto_paused = True
                 else:
                     if not all(active): self.auto_paused = True
 
+                # --- 游戏内退出逻辑 (FIST 长按 3秒) ---
+                fist_detected = False
+                for h in hands:
+                    if h.get("gesture") == "FIST":
+                        fist_detected = True
+                        break
+
+                if fist_detected:
+                    # 如果是第一次检测到，记录开始时间
+                    if self.quit_trigger_start == 0.0:
+                        self.quit_trigger_start = now
+
+                    elapsed_quit = now - self.quit_trigger_start
+                    if elapsed_quit >= 3.0:
+                        # 触发退出：关闭当前窗口，设置标志位
+                        cv2.destroyWindow(win)
+                        back_to_menu = True
+                        break
+                else:
+                    # 手势中断，重置计时器
+                    self.quit_trigger_start = 0.0
+
+                # 暂停逻辑处理
                 is_paused = self.auto_paused or self.manual_paused
                 if is_paused and not self.is_paused_now: self.pause_start_time = time.time()
                 if not is_paused and self.is_paused_now: self.total_paused_time += (time.time() - self.pause_start_time)
                 self.is_paused_now = is_paused
 
+                # 游戏逻辑更新 (未暂停且未结束时)
                 if not is_paused and not any(self.game_overs):
                     self.check_time_limit()
                     for i in range(self.num_snakes):
@@ -656,18 +586,17 @@ class SnakeGame:
                                                                     int(p[1] / frame.shape[0] * self.height))
                             self.move_snake(i)
 
+                    # 更新粒子
                     for p in self.particles: p.update()
                     self.particles = [p for p in self.particles if not p.is_dead()]
 
-                # Game Over Gesture Control
+                # --- 游戏结束后的手势控制 (重启/退出) ---
                 if any(self.game_overs):
                     detected_action = None
                     for h in hands:
                         g = h.get("gesture")
-                        
-                        # 根据模式判断重启手势
-                        # 单人模式: 食指向上 (POINTING_UP)
-                        # 双人模式: 剪刀手 (VICTORY)
+
+                        # 单人: 食指重启; 双人: 剪刀手重启
                         target_gesture = "POINTING_UP" if self.mode == "single" else "VICTORY"
 
                         if g == target_gesture:
@@ -676,40 +605,46 @@ class SnakeGame:
                         elif g == "FIST":
                             detected_action = 'quit'
                             break
-                    
+
                     if detected_action:
                         if self.go_trigger_action != detected_action:
                             self.go_trigger_action = detected_action
                             self.go_trigger_start = now
-                        
+
                         elapsed = now - self.go_trigger_start
                         if elapsed >= 3.0:
                             if self.go_trigger_action == 'restart':
+                                # 重启游戏：重新初始化状态，如果双人则重新绑定
                                 self._init_state()
                                 if self.mode == "dual":
-                                    if not self.bind_players(win): 
+                                    if not self.bind_players(win):
                                         cv2.destroyAllWindows()
                                         break
                             elif self.go_trigger_action == 'quit':
+                                # 退出到菜单
                                 cv2.destroyWindow(win)
+                                back_to_menu = True
                                 break
                     else:
-                         self.go_trigger_start = 0.0
-                         self.go_trigger_action = None
+                        self.go_trigger_start = 0.0
+                        self.go_trigger_action = None
 
+                # 绘制最终画面 (含 UI)
                 final_frame = display_game_overlay(self, frame)
-
                 cv2.imshow(win, final_frame)
 
+                # 键盘逻辑
                 k = cv2.waitKey(1) & 0xFF
                 if k in (ord('q'), 27):
                     cv2.destroyWindow(win)
+                    back_to_menu = True  # 按 Q 返回菜单
                     break
                 if k == ord('r'):
                     self._init_state()
                     if self.mode == "dual" and not self.bind_players(win): break
                 if k == 32: self.manual_paused = not self.manual_paused
 
+        # 彻底退出应用
         self.cap.release()
         cv2.destroyAllWindows()
 

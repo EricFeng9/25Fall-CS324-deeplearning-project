@@ -3,7 +3,7 @@ import numpy as np
 import math
 import time
 from PIL import Image, ImageDraw, ImageFont
-from typing import Tuple
+from typing import Tuple, Optional
 from config import *
 
 def get_safe_font(size: int) -> ImageFont.ImageFont:
@@ -20,16 +20,15 @@ def get_safe_font(size: int) -> ImageFont.ImageFont:
             continue
     return ImageFont.load_default()
 
+# 字体缓存 (避免每帧重新加载)
+_fonts = {}
+def get_font_cached(size):
+    if size not in _fonts:
+        _fonts[size] = get_safe_font(size)
+    return _fonts[size]
 
-def draw_text_pill(
-        draw: ImageDraw.ImageDraw,
-        pos: Tuple[int, int],
-        text: str,
-        font: ImageFont.ImageFont,
-        text_color: Tuple[int, int, int] = (255, 255, 255),
-        bg_color: Tuple[int, int, int, int] = (0, 0, 0, 160),
-        padding: int = 10,
-) -> None:
+
+def draw_text_pill(draw, pos, text, font, text_color=(255, 255, 255), bg_color=(0, 0, 0, 160), padding=10):
     x, y = pos
     bbox = draw.textbbox((0, 0), text, font=font)
     w = bbox[2] - bbox[0]
@@ -281,6 +280,278 @@ def draw_game_overlay(game, frame):
         draw.text(((game.width - tw)//2, (game.height - th)//2 + 150), text, font=game.font_title, fill=col)
 
     return cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGBA2BGR)
+
+# ---主菜单绘制函数 ---
+def draw_menu_interface(bg_img, menu_state, current_selection, confirm_progress, cam_rect):
+    """
+    绘制主菜单 (手指修长紧凑版)：
+    1. 手势图标：手指加长，指缝紧密（0间距）。
+    2. 视觉优化：保持袖口和肌理感。
+    """
+    img_pil = Image.fromarray(cv2.cvtColor(bg_img, cv2.COLOR_BGR2RGB))
+    draw = ImageDraw.Draw(img_pil, 'RGBA')
+    w, h = bg_img.shape[1], bg_img.shape[0]
+
+    font_title = get_font_cached(80)
+    font_card_title = get_font_cached(40)
+    font_card_desc = get_font_cached(22)
+    font_hint = get_font_cached(24)
+
+    # === 1. 标题 ===
+    title = "SNAKE FUSION" if menu_state == 'main' else "DIFFICULTY"
+    title_col = (255, 105, 180)
+    tb = draw.textbbox((0, 0), title, font=font_title)
+    title_w = tb[2] - tb[0]
+    draw.text(((w - title_w) // 2, 30), title, font=font_title, fill=title_col, stroke_width=3, stroke_fill="white")
+
+    # === 2. 摄像头 ===
+    cx, cy, cw, ch = cam_rect
+    dot_color = (255, 255, 255, 150)
+    for i in range(cx + cw + 40, w, 50):
+        for j in range(0, h, 50):
+            draw.ellipse((i, j, i + 8, j + 8), fill=dot_color)
+
+    border_col = (255, 255, 255)
+    draw.rounded_rectangle((cx - 12, cy - 12, cx + cw + 12, cy + ch + 12), radius=30, outline=border_col, width=10)
+    draw.rounded_rectangle((cx - 4, cy - 4, cx + cw + 4, cy + ch + 4), radius=25, outline=(255, 182, 193), width=4)
+
+    # === 3. 布局变量 ===
+    right_area_start = cx + cw + 20
+    right_center_x = right_area_start + (w - right_area_start) // 2 - 20
+    card_w, card_h = 280, 140
+
+    # ===================================================
+
+    # === 4. 内部辅助函数：绘制拟物手势图标 (修长版) ===
+    def _draw_hand_icon(draw, x, y, hand_type, bg_color):
+        # 1. 背景圆
+        r = 38  # 半径稍微加大一点以容纳长手指
+        draw.ellipse((x - r, y - r, x + r, y + r), fill=bg_color)
+        draw.ellipse((x - r, y - r, x + r, y + r), outline="white", width=2)
+
+        # 2. 手部参数
+        skin_color = (255, 220, 177)
+        contour_color = (230, 180, 140)
+        sleeve_color = (100, 149, 237)
+
+
+        finger_w = 9
+        finger_gap = 0  # 紧密贴合
+        base_w = (finger_w * 4)
+
+        # 居中偏移
+        start_x = x - base_w // 2
+        start_y = y - 6  # 整体稍微上移一点
+
+        # --- 绘制逻辑 ---
+
+        # A. SINGLE (食指 ☝️)
+        if hand_type == 'single':
+            # 弯曲的三指 (中、无名、小)
+            for i in range(1, 4):
+                fx = start_x + i * finger_w
+                # 弯曲状态高度增加
+                draw.rounded_rectangle((fx, start_y + 8, fx + finger_w, start_y + 24), radius=3, fill=skin_color)
+                draw.rounded_rectangle((fx, start_y + 8, fx + finger_w, start_y + 24), radius=3, outline=contour_color,
+                                       width=1)
+            # 食指 (伸直 - 加长)
+            draw.rounded_rectangle((start_x, start_y - 18, start_x + finger_w, start_y + 24), radius=3, fill=skin_color)
+            draw.rounded_rectangle((start_x, start_y - 18, start_x + finger_w, start_y + 24), radius=3,
+                                   outline=contour_color, width=1)
+            # 拇指 (横跨)
+            draw.rounded_rectangle((start_x, start_y + 16, start_x + 20, start_y + 22), radius=3, fill=skin_color)
+
+        # B. DUAL (剪刀手 ✌️)
+        elif hand_type == 'dual':
+            # 弯曲的两指
+            for i in range(2, 4):
+                fx = start_x + i * finger_w
+                draw.rounded_rectangle((fx, start_y + 8, fx + finger_w, start_y + 24), radius=3, fill=skin_color)
+                draw.rounded_rectangle((fx, start_y + 8, fx + finger_w, start_y + 24), radius=3, outline=contour_color,
+                                       width=1)
+            # 食指 (伸直)
+            draw.rounded_rectangle((start_x, start_y - 18, start_x + finger_w, start_y + 24), radius=3, fill=skin_color)
+            draw.rounded_rectangle((start_x, start_y - 18, start_x + finger_w, start_y + 24), radius=3,
+                                   outline=contour_color, width=1)
+            # 中指 (伸直，稍微分开)
+            # 为了分开，手动调整x坐标
+            mx = start_x + finger_w + 2
+            draw.rounded_rectangle((mx, start_y - 18, mx + finger_w, start_y + 24), radius=3, fill=skin_color)
+            draw.rounded_rectangle((mx, start_y - 18, mx + finger_w, start_y + 24), radius=3, outline=contour_color,
+                                   width=1)
+            # 拇指
+            draw.rounded_rectangle((start_x, start_y + 16, start_x + 18, start_y + 22), radius=3, fill=skin_color)
+
+        # C. EASY (小指 🤙)
+        elif hand_type == 'easy':
+            # 中间三指弯曲
+            for i in range(0, 3):
+                fx = start_x + i * finger_w
+                draw.rounded_rectangle((fx, start_y + 8, fx + finger_w, start_y + 24), radius=3, fill=skin_color)
+                draw.rounded_rectangle((fx, start_y + 8, fx + finger_w, start_y + 24), radius=3, outline=contour_color,
+                                       width=1)
+            # 小指 (伸直)
+            px = start_x + 3 * finger_w
+            draw.rounded_rectangle((px, start_y - 10, px + finger_w, start_y + 24), radius=3, fill=skin_color)
+            draw.rounded_rectangle((px, start_y - 10, px + finger_w, start_y + 24), radius=3, outline=contour_color,
+                                   width=1)
+            # 拇指 (伸出)
+            draw.rounded_rectangle((start_x - 6, start_y + 12, start_x + 6, start_y + 20), radius=3, fill=skin_color)
+
+        # D. HARD (竖大拇指 👍)
+        elif hand_type == 'hard':
+            # 四指弯曲 (紧密)
+            for i in range(4):
+                fx = start_x + i * finger_w
+                fy = start_y + (0 if i in [1, 2] else 3) + 6
+                draw.rounded_rectangle((fx, fy, fx + finger_w, fy + 18), radius=3, fill=skin_color)
+                draw.rounded_rectangle((fx, fy, fx + finger_w, fy + 18), radius=3, outline=contour_color, width=1)
+            # 拇指 (竖直向上)
+            draw.rounded_rectangle((start_x - 5, start_y - 8, start_x + 3, start_y + 16), radius=3, fill=skin_color)
+            draw.rounded_rectangle((start_x - 5, start_y - 8, start_x + 3, start_y + 16), radius=3,
+                                   outline=contour_color, width=1)
+
+        # --- 统一袖口 ---
+        sleeve_y = start_y + 26
+        # 稍微比手宽一点点
+        draw.rectangle((start_x - 2, sleeve_y, start_x + base_w + 2, sleeve_y + 6), fill=sleeve_color)
+        draw.line((start_x - 2, sleeve_y, start_x + base_w + 2, sleeve_y), fill=(255, 255, 255), width=1)
+
+    # === 5. 内部辅助函数 (底部的拳头提示 - 同样修长紧密) ===
+    def _draw_bottom_fist(draw, x, y):
+        skin_color = (255, 220, 177)
+        contour_color = (230, 180, 140)
+
+        finger_w = 6
+        gap = 0  # 紧密
+
+        # 四指
+        for i in range(4):
+            fx = x + i * finger_w
+            # 稍微拉长高度
+            draw.rounded_rectangle((fx, y, fx + finger_w, y + 22), radius=3, fill=skin_color)
+            # 加上轮廓线以区分手指
+            draw.rounded_rectangle((fx, y, fx + finger_w, y + 22), radius=3, outline=contour_color, width=1)
+
+        # 拇指
+        draw.rounded_rectangle((x - 2, y + 14, x + 20, y + 24), radius=3, fill=skin_color)
+        draw.rounded_rectangle((x - 2, y + 14, x + 20, y + 24), radius=3, outline=contour_color, width=1)
+
+        # 袖口
+        draw.rectangle((x - 2, y + 24, x + 26, y + 30), fill=(100, 149, 237))
+        draw.line((x - 2, y + 24, x + 26, y + 24), fill=(255, 255, 255), width=1)
+
+    # === 6. 内部辅助函数：绘制卡片 ===
+    def draw_card(y_pos, key, title, desc, icon_type, active_color):
+        is_selected = (current_selection == key)
+
+        cur_w, cur_h = card_w, card_h
+
+        # 1. 抖动
+        shake_x, shake_y = 0, 0
+        if is_selected and confirm_progress < 1.0:
+            if confirm_progress > 0.7:
+                intensity = int((confirm_progress - 0.7) * 4)
+                shake_x = np.random.randint(-intensity, intensity + 1)
+                shake_y = np.random.randint(-intensity, intensity + 1)
+
+        x = right_center_x - cur_w // 2 + shake_x
+        y = y_pos - (cur_h - card_h) // 2 + shake_y
+
+        # 2. 能量波
+        if is_selected and confirm_progress > 0.9:
+            ripple_scale = 1.0 + (confirm_progress - 0.9) * 4.0
+            rw = int(cur_w * ripple_scale)
+            rh = int(cur_h * ripple_scale)
+            rx = x + (cur_w - rw) // 2
+            ry = y + (cur_h - rh) // 2
+
+            alpha = int(255 * (1.0 - (confirm_progress - 0.9) * 10))
+            if alpha > 0:
+                draw.rounded_rectangle((rx, ry, rx + rw, ry + rh), radius=35, fill=active_color + (alpha,))
+
+        # 3. 颜色
+        if is_selected:
+            base_color = active_color
+            if confirm_progress > 0.9:
+                blend = (confirm_progress - 0.9) * 10
+                r = int(base_color[0] + (255 - base_color[0]) * blend)
+                g = int(base_color[1] + (255 - base_color[1]) * blend)
+                b = int(base_color[2] + (255 - base_color[2]) * blend)
+                fill_col = (r, g, b, 255)
+                text_col = (100, 100, 100)
+            else:
+                fill_col = active_color + (230,)
+                text_col = (255, 255, 255)
+
+            draw.rounded_rectangle((x + 10, y + 10, x + cur_w + 10, y + cur_h + 10), radius=25, fill=(0, 0, 0, 50))
+        else:
+            fill_col = (255, 255, 255, 180)
+            text_col = (80, 80, 80)
+            draw.rounded_rectangle((x + 5, y + 5, x + cur_w + 5, y + cur_h + 5), radius=25, fill=(0, 0, 0, 20))
+
+        # 4. 卡片本体
+        draw.rounded_rectangle((x, y, x + cur_w, y + cur_h), radius=25, fill=fill_col)
+
+        # 5. 进度条
+        if is_selected and confirm_progress < 0.98:
+            bar_h = 8
+            bx = x + 30
+            by = y + cur_h - 20
+            bw = cur_w - 60
+            draw.rectangle((bx, by, bx + bw, by + bar_h), fill=(255, 255, 255, 100))
+            draw.rectangle((bx, by, bx + int(bw * confirm_progress), by + bar_h), fill=(255, 255, 255))
+            remaining = max(0.0, 3.0 * (1.0 - confirm_progress))
+            draw.text((x + cur_w - 60, y + 10), f"{remaining:.1f}", font=font_hint, fill="white")
+
+        # 6. 绘制拟物图标
+        icon_x = x + 60
+        icon_y = y + cur_h // 2
+
+        bg_circle_color = (255, 255, 255, 150) if is_selected else active_color
+        if is_selected and confirm_progress > 0.9: bg_circle_color = (255, 255, 255)
+
+        _draw_hand_icon(draw, icon_x, icon_y, icon_type, bg_circle_color)
+
+        # 文字
+        text_x = x + 113
+        draw.text((text_x, y + 40), title, font=font_card_title, fill=text_col)
+        draw.text((text_x, y + 85), desc, font=font_card_desc, fill=text_col)
+
+    # === 7. 执行绘制 ===
+    card1_y_pos = int(h * 0.28)
+    card2_y_pos = int(h * 0.58)
+
+    if menu_state == 'main':
+        draw_card(card1_y_pos, 'single', "Single", "Pointing Up", 'single', (255, 182, 193))
+        draw_card(card2_y_pos, 'dual', "Dual", "Victory Hand", 'dual', (135, 206, 250))
+        hint_text = "Quit App: Fist "
+    elif menu_state == 'difficulty':
+        draw_card(card1_y_pos, 'easy', "Easy", "Pinky Up", 'easy', (0, 200, 200))
+        draw_card(card2_y_pos, 'hard', "Hard", "Thumb Up", 'hard', (255, 100, 100))
+        hint_text = "Back: Fist "
+
+    # === 8. 底部提示 ===
+    tb = draw.textbbox((0, 0), hint_text, font=font_hint)
+    text_w = tb[2] - tb[0]
+    total_w = text_w + 35
+    start_x = right_center_x - total_w // 2
+    draw.text((start_x - 5, h - 78), hint_text, font=font_hint, fill=(150, 150, 150))
+    _draw_bottom_fist(draw, start_x + text_w + 5, h - 83)
+
+    # === 9. 退出反馈 ===
+    if current_selection in ['quit_app', 'back_to_main']:
+        draw.rectangle((0, 0, w, h), outline=(255, 0, 0), width=15)
+        remaining = 3.0 * (1.0 - confirm_progress)
+        warn_text = f"EXITING... {remaining:.1f}s" if current_selection == 'quit_app' else f"BACK... {remaining:.1f}s"
+        font_warn = get_font_cached(60)
+        tb = draw.textbbox((0, 0), warn_text, font=font_warn)
+        cx, cy = w // 2, h // 2
+        draw.rounded_rectangle((cx - 200, cy - 50, cx + 200, cy + 50), fill=(0, 0, 0, 180), radius=20)
+        draw.text((cx - (tb[2] - tb[0]) // 2, cy - (tb[3] - tb[1]) // 2), warn_text, font=font_warn, fill=(255, 50, 50))
+
+    return cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGBA2BGR)
+
 
 # Alias for compatibility if needed, though game.py calls display_game_overlay now
 display_game_overlay = draw_game_overlay
