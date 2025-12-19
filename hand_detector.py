@@ -3,8 +3,8 @@ import mediapipe as mp
 import numpy as np
 from typing import List, Dict
 
-def gstreamer_pipeline(sensor_id=0, sensor_mode=4, capture_width=1280, capture_height=720, display_width=1280,
-                       display_height=720, framerate=30, flip_method=2) -> str:
+def gstreamer_pipeline(sensor_id=0, sensor_mode=4, capture_width=640, capture_height=360, display_width=1280,
+                       display_height=720, framerate=60, flip_method=2) -> str:
     return f"nvarguscamerasrc sensor-id={sensor_id} sensor-mode={sensor_mode} ! video/x-raw(memory:NVMM), width=(int){capture_width}, height=(int){capture_height}, format=(string)NV12, framerate=(fraction){framerate}/1 ! nvvidconv flip-method={flip_method} ! video/x-raw, width=(int){display_width}, height=(int){display_height}, format=(string)BGRx ! videoconvert ! video/x-raw, format=(string)BGR ! appsink"
 
 

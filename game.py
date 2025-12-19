@@ -1,4 +1,3 @@
-from __future__ import annotations
 import random
 import time
 import math
@@ -11,6 +10,64 @@ from hand_detector import HandTracker, gstreamer_pipeline
 from ui import *
 
 # -------------------- 辅助类 --------------------
+
+import threading
+from time import perf_counter
+
+# 新增类：持续读取并保存最新帧
+class FrameGrabber:
+    def __init__(self, cap, name="FrameGrabber"):
+        self.cap = cap
+        self.running = False
+        self.lock = threading.Lock()
+        self.frame = None
+        self.ts = 0.0
+        self.thread = threading.Thread(target=self._run, name=name, daemon=True)
+
+        # 尝试把驱动缓冲区设小（如果后端支持）
+        try:
+            self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        except Exception:
+            pass
+
+    def start(self):
+        self.running = True
+        self.thread.start()
+
+    def _run(self):
+        while self.running:
+            # Use grab+retrieve to avoid blocking semantics on some backends
+            ret = self.cap.grab()
+            if not ret:
+                # fallback to read if grab failed
+                ret, f = self.cap.read()
+                if not ret:
+                    time.sleep(0.01)
+                    continue
+                ts = perf_counter()
+            else:
+                ret, f = self.cap.retrieve()
+                ts = perf_counter() if ret else 0.0
+                if not ret:
+                    time.sleep(0.005)
+                    continue
+
+            with self.lock:
+                self.frame = f
+                self.ts = ts
+
+    def read(self):
+        """Return (ret, frame, timestamp). frame is a copy reference; caller should not block long."""
+        with self.lock:
+            if self.frame is None:
+                return False, None, 0.0
+            return True, self.frame.copy(), self.ts
+
+    def stop(self):
+        self.running = False
+        if self.thread.is_alive():
+            self.thread.join(timeout=0.5)
+
 
 class Particle:
     def __init__(self, x, y, color):
@@ -101,6 +158,9 @@ class SnakeGame:
             self.cap = cv2.VideoCapture(0)
             self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
             self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+
+        self.grabber = FrameGrabber(self.cap)
+        self.grabber.start()
 
         self._init_state()
 
@@ -223,8 +283,13 @@ class SnakeGame:
 
         while True:
             # 1. 读取摄像头
-            ret, frame = self.cap.read()
-            if not ret: return False
+            # ret, frame = self.cap.read()
+            # if not ret: return False
+            ret, frame, frame_ts = self.grabber.read()
+            if not ret:
+                # 轻微等待/跳过
+                time.sleep(0.005)
+                continue
             frame = cv2.flip(frame, 1)
 
             # 2. 检测手势
@@ -347,8 +412,13 @@ class SnakeGame:
         counting = False
 
         while True:
-            ret, frame = self.cap.read()
-            if not ret: return False
+            # ret, frame = self.cap.read()
+            # if not ret: return False
+            ret, frame, frame_ts = self.grabber.read()
+            if not ret:
+                # 轻微等待/跳过
+                time.sleep(0.005)
+                continue
             frame = cv2.flip(frame, 1)
             hands = self.tracker.detect(frame)
 
@@ -527,14 +597,36 @@ class SnakeGame:
             # 2. 游戏内主循环
             back_to_menu = False  # 标记：是否需要返回主菜单
 
+            detect_time_total = 0
+            logic_time_total = 0
+            draw_time_total = 0
+            detect_count = 0
+            logic_count = 0
+            draw_count = 0
+            fps_counter = 0
+            last_fps_time = time.time()
             while True:
-                ret, frame = self.cap.read()
-                if not ret: break
+
+                frame_start = time.time()
+
+                # ret, frame = self.cap.read()
+                # if not ret: break
+                ret, frame, frame_ts = self.grabber.read()
+                if not ret:
+                    # 轻微等待/跳过
+                    time.sleep(0.005)
+                    continue
                 frame = cv2.flip(frame, 1)
                 now = time.time()
 
                 # 手势检测
+                detect_start = time.time()
                 hands = self.tracker.detect(frame)
+                detect_end = time.time()
+                detect_time = detect_end - detect_start
+
+                detect_time_total += detect_time
+                detect_count += 1
 
                 # 只有当手势有效时才更新蛇的控制
                 heads = [s[0] if s else (0, 0) for s in self.snakes]
@@ -629,9 +721,22 @@ class SnakeGame:
                         self.go_trigger_start = 0.0
                         self.go_trigger_action = None
 
+                logic_end = time.time()
+                logic_time = logic_end - detect_end
+                logic_time_total += logic_time
+                logic_count += 1
+
                 # 绘制最终画面 (含 UI)
                 final_frame = display_game_overlay(self, frame)
+                draw_end = time.time()
+                draw_time = draw_end - logic_end
+                draw_time_total += draw_time
+                draw_count += 1
+
                 cv2.imshow(win, final_frame)
+
+                
+
 
                 # 键盘逻辑
                 k = cv2.waitKey(1) & 0xFF
@@ -644,8 +749,29 @@ class SnakeGame:
                     if self.mode == "dual" and not self.bind_players(win): break
                 if k == 32: self.manual_paused = not self.manual_paused
 
+
+                # 统计FPS
+                fps_counter += 1
+                if time.time() - last_fps_time > 1.0:
+                    avg_detect_time = detect_time_total / max(detect_count, 1)
+                    avg_logic_time = logic_time_total / max(logic_count, 1)
+                    avg_draw_time = draw_time_total / max(draw_count, 1)
+                    print(f"FPS: {fps_counter:.1f}")
+                    print(f"手势检测平均耗时: {avg_detect_time*1000:.1f}ms")
+                    print(f"游戏逻辑平均耗时: {avg_logic_time*1000:.1f}ms")
+                    print(f"显示画面平均耗时: {avg_draw_time*1000:.1f}ms")
+                    fps_counter = 0
+                    last_fps_time = time.time()
+                    detect_time_total = 0
+                    detect_count = 0
+                    logic_time_total = 0
+                    logic_count = 0
+                    draw_time_total = 0
+                    draw_count = 0
+
         # 彻底退出应用
         self.cap.release()
+        self.grabber.stop()
         cv2.destroyAllWindows()
 
     def check_time_limit(self):
